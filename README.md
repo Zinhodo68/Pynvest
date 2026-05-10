@@ -30,3 +30,5 @@ pip install -r requirements.txt
 
 # Lancer l'application
 python main.py
+
+test
