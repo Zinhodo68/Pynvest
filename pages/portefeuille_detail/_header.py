@@ -54,6 +54,7 @@ def render_header(data, type_info, accent_color, c, portefeuille_id, refresh, mo
                     ui.label(type_info['label']).classes('text-xs uppercase tracking-wider') \
                         .style(f'color: {c["text_secondary"]}; font-weight: 600;')
 
+            # ── Boutons d'action ──
             with ui.row().classes('gap-2'):
                 if data['url_gestion']:
                     ui.button('Site', icon='open_in_new',
@@ -63,10 +64,12 @@ def render_header(data, type_info, accent_color, c, portefeuille_id, refresh, mo
                             f'color: {c["text_primary"]}; '
                             f'border-color: {c["text_secondary"]};'
                         )
+
                 ui.button(icon='edit',
                           on_click=lambda: _open_edit_portefeuille(
                               portefeuille_id, c, refresh)) \
                     .props('flat round dense').style(f'color: {c["text_secondary"]}')
+
                 ui.button('+ Valorisation',
                           on_click=lambda: open_valorisation_dialog(
                               portefeuille_id, c, refresh)) \

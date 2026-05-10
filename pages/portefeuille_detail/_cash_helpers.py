@@ -5,9 +5,9 @@ from database.models import Position
 
 def impact_cash(type_operation: str, montant: float) -> float:
     """Retourne l'impact d'une transaction sur le solde de cash."""
-    if type_operation in ('versement', 'dividende'):
+    if type_operation in ('versement', 'dividende', 'vente'):
         return montant
-    elif type_operation in ('retrait', 'frais'):
+    elif type_operation in ('retrait', 'frais', 'achat'):
         return -montant
     return 0
 

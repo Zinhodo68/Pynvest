@@ -116,19 +116,19 @@ def _render_position_row(pos, c, portefeuille_id, refresh):
                 f'color: {c["text_secondary"]}; width: 100px; text-align: right;'
             )
 
-        ui.label(format_money(pos['valorisation'])).classes(
+        ui.label(format_money(pos['valorisation'], decimals=2)).classes(
             'text-sm font-semibold'
         ).style(f'color: {c["text_primary"]}; width: 130px; text-align: right;')
 
         with ui.column().classes('gap-0').style(
-            'width: 130px; align-items: flex-end;'
+                'width: 130px; align-items: flex-end;'
         ):
             if is_cash:
                 ui.label('—').classes('text-sm').style(
                     f'color: {c["text_secondary"]};'
                 )
             else:
-                ui.label(format_money(pos['plus_value'])).classes(
+                ui.label(format_money(pos['plus_value'], decimals=2)).classes(  # ← decimals=2
                     'text-sm font-semibold'
                 ).style(f'color: {pv_color};')
                 ui.label(format_percent(pos['plus_value_pct'])).classes(
@@ -160,14 +160,15 @@ def _render_positions_footer(total_pru, total_valo, total_pv, c):
         ui.label('').style('width: 110px;')
         ui.label('').style('width: 90px;')
         ui.label('').style('width: 100px;')
-        ui.label(format_money(total_pru)).classes('text-sm').style(
+        # Footer total
+        ui.label(format_money(total_pru, decimals=2)).classes('text-sm').style(
             f'color: {c["text_secondary"]}; width: 100px; text-align: right;'
         )
-        ui.label(format_money(total_valo)).classes('text-sm font-bold').style(
+        ui.label(format_money(total_valo, decimals=2)).classes('text-sm font-bold').style(
             f'color: {c["text_primary"]}; width: 130px; text-align: right;'
         )
         with ui.column().classes('gap-0').style('width: 130px; align-items: flex-end;'):
-            ui.label(format_money(total_pv)).classes('text-sm font-bold').style(
+            ui.label(format_money(total_pv, decimals=2)).classes('text-sm font-bold').style(
                 f'color: {total_color};'
             )
             pv_pct = (total_pv / total_pru * 100) if total_pru > 0 else 0

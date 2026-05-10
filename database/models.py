@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Date, DateTime, Float, ForeignKey, Text, func
+from sqlalchemy import Column, Integer, String, Date, DateTime, Float, ForeignKey, Text, Boolean, func
 from sqlalchemy.orm import relationship
 from database.db import Base
 
@@ -160,44 +160,56 @@ class Valorisation(Base):
 
 
 class Transaction(Base):
-    """Versement, retrait, dividende, frais..."""
     __tablename__ = 'transactions'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     portefeuille_id = Column(Integer, ForeignKey('portefeuilles.id'), nullable=False)
     date_operation = Column(Date, nullable=False)
-    type_operation = Column(String(50), nullable=False)  # versement, retrait, dividende, frais
+    type_operation = Column(String(50), nullable=False)
     montant = Column(Float, nullable=False)
     libelle = Column(String(200), nullable=True)
+
+    # ✨ NOUVEAU : lien vers la transaction parente (pour les frais liés à un achat)
+    parent_transaction_id = Column(Integer, ForeignKey('transactions.id'), nullable=True)
+
     created_at = Column(DateTime, server_default=func.now())
 
     portefeuille = relationship('Portefeuille', back_populates='transactions')
 
+    # Relation auto-référentielle pour les transactions liées
+    parent = relationship('Transaction', remote_side=[id], backref='children')
+
 
 class Position(Base):
-    """Une ligne dans un portefeuille multi-supports (action, ETF, SCPI, fonds, crypto...)."""
+    """Une ligne dans un portefeuille multi-supports."""
     __tablename__ = 'positions'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     portefeuille_id = Column(Integer, ForeignKey('portefeuilles.id'), nullable=False)
 
-    nom = Column(String(200), nullable=False)  # ex: "ETF World", "Apple", "SCPI Primovie"
-    code = Column(String(50), nullable=True)  # ISIN, ticker, etc.
-    categorie = Column(String(50), nullable=True)  # Action, ETF, SCPI, Fonds, Crypto, Obligation
+    nom = Column(String(200), nullable=False)
+    code = Column(String(50), nullable=True)            # ISIN
+    ticker = Column(String(50), nullable=True)           # ticker Yahoo (AAPL, CW8.PA...)
+    categorie = Column(String(50), nullable=True)
 
-    quantite = Column(Float, nullable=False, default=0)  # nombre de parts
-    prix_moyen = Column(Float, nullable=False, default=0)  # PRU (prix de revient unitaire)
-    cours_actuel = Column(Float, nullable=True)  # dernier cours connu
+    quantite = Column(Float, nullable=False, default=0)
+    prix_moyen = Column(Float, nullable=False, default=0)
+    cours_actuel = Column(Float, nullable=True)
 
     devise = Column(String(10), default='EUR')
     notes = Column(Text, nullable=True)
     date_ouverture = Column(Date, nullable=True)
+
+    # Métadonnées de marché
+    auto_update = Column(Boolean, default=True)
+    last_update = Column(DateTime, nullable=True)
 
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
     portefeuille = relationship('Portefeuille', back_populates='positions')
 
+    # ─── Propriétés calculées ───
     @property
     def prix_revient(self):
         """Coût total d'acquisition."""
@@ -225,6 +237,7 @@ class Position(Base):
             'id': self.id,
             'nom': self.nom,
             'code': self.code,
+            'ticker': self.ticker,
             'categorie': self.categorie,
             'quantite': self.quantite,
             'prix_moyen': self.prix_moyen,
@@ -232,6 +245,7 @@ class Position(Base):
             'devise': self.devise,
             'notes': self.notes,
             'date_ouverture': self.date_ouverture.isoformat() if self.date_ouverture else None,
+            'auto_update': self.auto_update,
             'prix_revient': self.prix_revient,
             'valorisation': self.valorisation,
             'plus_value': self.plus_value,
