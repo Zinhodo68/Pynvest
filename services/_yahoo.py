@@ -82,3 +82,145 @@ def get_currency_rate(from_curr: str, to_curr: str = 'EUR') -> Optional[float]:
         return float(ticker.fast_info.get('lastPrice'))
     except Exception:
         return None
+
+
+def get_yahoo_history(symbol: str, start_date, end_date=None) -> list[dict]:
+    """Récupère l'historique des cours quotidiens d'un titre.
+
+    Args:
+        symbol: ticker Yahoo (ex: 'MC.PA', 'AAPL')
+        start_date: date.date de début
+        end_date: date.date de fin (défaut: aujourd'hui)
+
+    Returns:
+        Liste de dicts {'date': date, 'cours': float, 'currency': str}
+    """
+    from datetime import date as _date
+
+    if end_date is None:
+        end_date = _date.today()
+
+    try:
+        ticker = yf.Ticker(symbol)
+        # period='max' fonctionne aussi, mais on préfère contrôler les dates
+        hist = ticker.history(
+            start=start_date.isoformat(),
+            end=(end_date).isoformat(),
+            auto_adjust=True,
+        )
+
+        if hist.empty:
+            print(f'   ⚠️  Aucun historique pour {symbol}')
+            return []
+
+        # Devise du titre
+        try:
+            currency = ticker.fast_info.get('currency', 'USD')
+        except Exception:
+            currency = 'USD'
+
+        # Conversion DataFrame → liste de dicts
+        result = []
+        for idx, row in hist.iterrows():
+            result.append({
+                'date': idx.date(),  # idx est un Timestamp pandas
+                'cours': float(row['Close']),
+                'currency': currency,
+            })
+
+        return result
+    except Exception as e:
+        print(f'   ❌ Erreur historique Yahoo {symbol}: {e}')
+        return []
+
+
+def get_yahoo_price_at_date(symbol: str, target_date) -> dict:
+    """Récupère le cours d'un titre à une date donnée.
+
+    Si la date demandée n'a pas de cours (week-end, férié),
+    retourne le dernier cours connu avant.
+    """
+    try:
+        from datetime import timedelta
+        ticker = yf.Ticker(symbol)
+        # On télécharge une fenêtre de 7 jours autour pour gérer week-ends/fériés
+        start = target_date - timedelta(days=7)
+        end = target_date + timedelta(days=1)
+        hist = ticker.history(
+            start=start.isoformat(),
+            end=end.isoformat(),
+            auto_adjust=True,
+        )
+        if hist.empty:
+            return {'price': None, 'currency': 'USD'}
+
+        # On prend la dernière ligne <= target_date
+        target_ts = datetime.combine(target_date, datetime.min.time())
+        valid_rows = hist[hist.index.date <= target_date]
+        if valid_rows.empty:
+            return {'price': None, 'currency': 'USD'}
+
+        last_row = valid_rows.iloc[-1]
+        try:
+            currency = ticker.fast_info.get('currency', 'USD')
+        except Exception:
+            currency = 'USD'
+
+        return {
+            'price': float(last_row['Close']),
+            'currency': currency,
+        }
+    except Exception as e:
+        print(f'Erreur get_yahoo_price_at_date {symbol}: {e}')
+        return {'price': None, 'currency': 'USD'}
+
+
+def get_yahoo_price_at_date(symbol: str, target_date) -> dict:
+    """Récupère le cours de clôture d'un titre à une date donnée.
+
+    Si la date est un week-end ou jour férié, retourne le dernier cours
+    connu avant cette date (ex: vendredi pour un samedi).
+
+    Args:
+        symbol: ticker Yahoo (ex: 'MC.PA')
+        target_date: date.date cible
+
+    Returns:
+        {'price': float, 'currency': str} ou {'price': None, 'currency': 'USD'}
+    """
+    from datetime import timedelta, date as _date, datetime as _dt
+
+    try:
+        ticker = yf.Ticker(symbol)
+        # Fenêtre de 10 jours avant pour gérer week-ends/fériés/congés
+        start = target_date - timedelta(days=10)
+        end = target_date + timedelta(days=1)
+
+        hist = ticker.history(
+            start=start.isoformat(),
+            end=end.isoformat(),
+            auto_adjust=True,
+        )
+
+        if hist.empty:
+            return {'price': None, 'currency': 'USD'}
+
+        # Filtrer pour ne garder que les dates <= target_date
+        valid_rows = hist[hist.index.date <= target_date]
+        if valid_rows.empty:
+            return {'price': None, 'currency': 'USD'}
+
+        last_row = valid_rows.iloc[-1]
+
+        try:
+            currency = ticker.fast_info.get('currency', 'USD')
+        except Exception:
+            currency = 'USD'
+
+        return {
+            'price': float(last_row['Close']),
+            'currency': currency,
+        }
+    except Exception as e:
+        print(f'Erreur get_yahoo_price_at_date {symbol}: {e}')
+        return {'price': None, 'currency': 'USD'}

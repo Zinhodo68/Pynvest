@@ -305,7 +305,11 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                 with ui.input("Date d'achat", value=date_today_fr).classes('w-full') \
                         .props('mask="##/##/####" placeholder="JJ/MM/AAAA"') as date_input:
                     with ui.menu().props('no-parent-event') as menu:
-                        with ui.date().bind_value(date_input).props('mask="DD/MM/YYYY"'):
+                        # 🆕 On garde une référence au composant date
+                        date_picker = ui.date().bind_value(date_input).props(
+                            'mask="DD/MM/YYYY"'
+                        )
+                        with date_picker:
                             with ui.row().classes('justify-end'):
                                 ui.button('Fermer', on_click=menu.close).props('flat')
                     with date_input.add_slot('append'):
@@ -313,12 +317,124 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                             'cursor-pointer'
                         )
 
-                # Prix
+                # Prix unitaire (avec auto-remplissage selon la date)
                 prix_input = ui.number(
                     f'Prix unitaire ({t.get("currency", "EUR")}) *',
                     value=t.get('current_price') or 0,
                     format='%.4f', min=0
                 ).classes('w-full')
+
+                # 🆕 Indicateur de la source du prix
+                price_info_label = ui.label('').classes('text-xs italic px-2').style(
+                    f'color: {c["text_secondary"]}; min-height: 16px;'
+                )
+
+                # 🆕 Flag pour savoir si l'utilisateur a modifié le prix manuellement
+                price_state = {
+                    'manually_modified': False,
+                    'last_auto_value': t.get('current_price') or 0,
+                }
+
+                # Initialiser le label avec le cours actuel
+                if t.get('current_price'):
+                    price_info_label.text = (
+                        f"💹 Cours actuel du marché : {t['current_price']:.4f} "
+                        f"{t.get('currency', 'EUR')}"
+                    )
+
+                # 🆕 Fonction d'auto-update du prix selon la date
+                async def update_price_for_date():
+                    """Récupère le cours historique pour la date sélectionnée."""
+                    # Si l'utilisateur a modifié manuellement → on n'écrase pas
+                    if price_state['manually_modified']:
+                        return
+
+                    # Pas applicable pour le mode manuel
+                    if t.get('source') == 'manual':
+                        return
+
+                    # Parse la date
+                    try:
+                        target_date = datetime.strptime(
+                            date_input.value, '%d/%m/%Y'
+                        ).date()
+                    except (ValueError, TypeError):
+                        return
+
+                    # Si c'est aujourd'hui → on garde le current_price
+                    if target_date == date.today():
+                        if t.get('current_price'):
+                            updating['value'] = True
+                            prix_input.value = t['current_price']
+                            price_state['last_auto_value'] = t['current_price']
+                            updating['value'] = False
+                            price_info_label.text = (
+                                f"💹 Cours actuel du marché : "
+                                f"{t['current_price']:.4f} "
+                                f"{t.get('currency', 'EUR')}"
+                            )
+                            update_montant_from_qte()
+                        return
+
+                    # Sinon, on récupère le cours historique
+                    price_info_label.text = '⏳ Récupération du cours historique...'
+
+                    source = t.get('source', 'yahoo')
+                    symbol_or_url = (t.get('url') if source == 'boursorama'
+                                     else t.get('symbol'))
+
+                    try:
+                        from services.market_data import get_price_at_date_with_currency
+                        info = await asyncio.to_thread(
+                            get_price_at_date_with_currency,
+                            symbol_or_url, source, target_date
+                        )
+
+                        if info['price'] is not None:
+                            updating['value'] = True
+                            prix_input.value = round(info['price'], 4)
+                            price_state['last_auto_value'] = info['price']
+                            updating['value'] = False
+                            price_info_label.text = (
+                                f"💹 Cours du marché au {target_date.strftime('%d/%m/%Y')} : "
+                                f"{info['price']:.4f} {info.get('currency', 'EUR')}"
+                            )
+                            update_montant_from_qte()
+                        else:
+                            price_info_label.text = (
+                                f"⚠️ Cours historique non disponible "
+                                f"(saisie manuelle requise)"
+                            )
+                    except Exception as e:
+                        price_info_label.text = f"⚠️ Erreur : {e}"
+
+                # 🆕 Détection de la modification manuelle du prix
+                def on_price_change(e):
+                    """Détecte si l'utilisateur modifie le prix manuellement."""
+                    if updating['value']:
+                        return  # C'est nous qui avons changé la valeur, pas l'user
+
+                    try:
+                        new_value = float(prix_input.value or 0)
+                        # On compare avec la dernière valeur auto-set
+                        if abs(new_value - price_state['last_auto_value']) > 0.0001:
+                            price_state['manually_modified'] = True
+                            price_info_label.text = (
+                                f"✏️ Prix modifié manuellement"
+                            )
+                    except (TypeError, ValueError):
+                        pass
+                    update_montant_from_qte()
+
+                # 🆕 Quand la date change → recalculer le prix
+                def on_date_change(e):
+                    """Réinitialise le flag manuel et déclenche la MAJ du prix."""
+                    price_state['manually_modified'] = False
+                    asyncio.create_task(update_price_for_date())
+
+                # 🆕 Écoute le date picker ET l'input texte (pour tous les cas)
+                date_picker.on('update:model-value', on_date_change)
+                date_input.on('blur', on_date_change)  # Quand l'user tape et sort du champ
 
                 # Frais
                 frais_input = ui.number(
@@ -377,8 +493,7 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                                     lambda _: update_montant_from_qte())
                 montant_input.on('update:model-value',
                                    lambda _: update_qte_from_montant())
-                prix_input.on('update:model-value',
-                                lambda _: update_montant_from_qte())
+                prix_input.on('update:model-value', on_price_change)
                 frais_input.on('update:model-value', lambda _: update_summary())
 
                 summary_label = ui.label().classes(

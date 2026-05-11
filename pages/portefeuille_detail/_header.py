@@ -171,31 +171,29 @@ def _open_edit_portefeuille(portefeuille_id, c, refresh):
     _open_dialog(c, refresh, portefeuille_id=portefeuille_id)
 
 
-def _refresh_quotes(c, refresh):
+async def _refresh_quotes(c, refresh):
     """Force la mise à jour des cours en arrière-plan."""
     from services.quotes_updater import update_all_quotes
-    import threading
+    from nicegui import run
 
     ui.notify('🔄 Mise à jour des cours en cours...', type='info', timeout=2000)
 
-    def do_update():
-        try:
-            stats = update_all_quotes(force=True)
-            if stats['updated'] == 0 and stats['errors'] == 0:
-                ui.notify('Aucune position à mettre à jour', type='info')
-            elif stats['errors'] > 0:
-                ui.notify(
-                    f"✅ {stats['updated']} cours mis à jour, "
-                    f"⚠️ {stats['errors']} erreur(s)",
-                    type='warning', timeout=4000
-                )
-            else:
-                ui.notify(
-                    f"✅ {stats['updated']} cours mis à jour",
-                    type='positive'
-                )
-            refresh()
-        except Exception as e:
-            ui.notify(f'❌ Erreur : {e}', type='negative', timeout=5000)
+    try:
+        stats = await run.io_bound(update_all_quotes, force=True)
 
-    threading.Thread(target=do_update, daemon=True).start()
+        if stats['updated'] == 0 and stats['errors'] == 0:
+            ui.notify('Aucune position à mettre à jour', type='info')
+        elif stats['errors'] > 0:
+            ui.notify(
+                f"✅ {stats['updated']} cours mis à jour, "
+                f"⚠️ {stats['errors']} erreur(s)",
+                type='warning', timeout=4000
+            )
+        else:
+            ui.notify(
+                f"✅ {stats['updated']} cours mis à jour",
+                type='positive'
+            )
+        refresh()
+    except Exception as e:
+        ui.notify(f'❌ Erreur : {e}', type='negative', timeout=5000)

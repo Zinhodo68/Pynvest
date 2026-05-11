@@ -36,3 +36,25 @@ __all__ = [
     'search_action_etf', 'search_fonds_opcvm',
     'get_current_price_with_currency', 'get_currency_rate',
 ]
+
+
+def get_price_at_date_with_currency(symbol_or_url: str, source: str, target_date) -> dict:
+    """Récupère le cours d'un titre à une date donnée, depuis la source spécifiée.
+
+    Args:
+        symbol_or_url: ticker Yahoo ou URL/ISIN Boursorama
+        source: 'yahoo' ou 'boursorama'
+        target_date: date.date cible
+
+    Returns:
+        {'price': float|None, 'currency': str}
+    """
+    if source == 'yahoo':
+        from services._yahoo import get_yahoo_price_at_date
+        return get_yahoo_price_at_date(symbol_or_url, target_date)
+    elif source == 'boursorama':
+        # Boursorama ne supporte pas l'historique facilement
+        # → On retourne le cours actuel en fallback
+        return get_current_price_with_currency(symbol_or_url, source)
+    else:
+        return {'price': None, 'currency': 'EUR'}

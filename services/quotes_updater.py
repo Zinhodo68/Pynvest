@@ -120,9 +120,24 @@ def update_all_quotes(force: bool = False) -> dict:
 
         session.commit()
 
-    set_last_update_date(today)
-    print(f'✅ Mise à jour terminée : {stats}')
-    return stats
+        # 🆕 Backfill des valorisations historiques pour chaque portefeuille
+        from services.backfill import backfill_portefeuille
+        with get_session() as session:
+            portefeuille_ids = [
+                p_id for (p_id,) in session.execute(
+                    select(Portefeuille.id)
+                ).all()
+            ]
+
+        for p_id in portefeuille_ids:
+            try:
+                backfill_portefeuille(p_id)
+            except Exception as e:
+                print(f'   ⚠️ Backfill échoué pour portefeuille {p_id}: {e}')
+
+        set_last_update_date(today)
+        print(f'✅ Mise à jour terminée : {stats}')
+        return stats
 
 
 def get_quotes_history(ticker: str = None, isin: str = None,
