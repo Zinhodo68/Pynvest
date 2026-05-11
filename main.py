@@ -6,6 +6,19 @@ from nicegui import ui, app
 from database.db import init_db
 init_db()
 
+# ✨ Mise à jour des cours au démarrage (en arrière-plan)
+def _startup_update_quotes():
+    """Job au démarrage : met à jour les cours si pas fait aujourd'hui."""
+    try:
+        from services.quotes_updater import update_all_quotes
+        update_all_quotes(force=False)
+    except Exception as e:
+        print(f'❌ Erreur MAJ cours au démarrage : {e}')
+
+# Lance la MAJ en arrière-plan (non bloquant)
+import threading
+threading.Thread(target=_startup_update_quotes, daemon=True).start()
+
 # Dossier uploads exposé en statique
 UPLOADS_DIR = Path(__file__).parent / 'uploads' / 'logos'
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)

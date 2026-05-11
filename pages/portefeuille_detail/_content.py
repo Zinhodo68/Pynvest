@@ -45,6 +45,7 @@ def _render_content(portefeuille_id, c, is_dark, refresh):
         transactions = [{
             'id': t.id, 'date': t.date_operation.isoformat(),
             'type': t.type_operation, 'montant': t.montant, 'libelle': t.libelle,
+            'parent_transaction_id': t.parent_transaction_id,  # ✨ ajout
         } for t in p.transactions]
         positions = [pos.to_dict() for pos in p.positions]
         data['taux_interet'] = p.taux_interet

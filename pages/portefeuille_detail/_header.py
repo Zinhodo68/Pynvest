@@ -55,7 +55,7 @@ def render_header(data, type_info, accent_color, c, portefeuille_id, refresh, mo
                         .style(f'color: {c["text_secondary"]}; font-weight: 600;')
 
             # ── Boutons d'action ──
-            with ui.row().classes('gap-2'):
+            with ui.row().classes('gap-2 items-center'):
                 if data['url_gestion']:
                     ui.button('Site', icon='open_in_new',
                               on_click=lambda url=data['url_gestion']:
@@ -65,11 +65,22 @@ def render_header(data, type_info, accent_color, c, portefeuille_id, refresh, mo
                             f'border-color: {c["text_secondary"]};'
                         )
 
+                # ✨ Bouton rafraîchir les cours (uniquement pour multi-supports)
+                if not mono:
+                    ui.button(icon='refresh',
+                              on_click=lambda: _refresh_quotes(c, refresh)) \
+                        .props('flat round dense') \
+                        .style(f'color: {c["text_secondary"]}') \
+                        .tooltip('Actualiser les cours')
+
+                # Édition du portefeuille
                 ui.button(icon='edit',
                           on_click=lambda: _open_edit_portefeuille(
                               portefeuille_id, c, refresh)) \
-                    .props('flat round dense').style(f'color: {c["text_secondary"]}')
+                    .props('flat round dense').style(f'color: {c["text_secondary"]}') \
+                    .tooltip('Modifier le portefeuille')
 
+                # Valorisation manuelle
                 ui.button('+ Valorisation',
                           on_click=lambda: open_valorisation_dialog(
                               portefeuille_id, c, refresh)) \
@@ -158,3 +169,33 @@ def _open_edit_portefeuille(portefeuille_id, c, refresh):
     """Réutilise le dialogue d'édition de portfolios.py."""
     from pages.portfolios import _open_dialog
     _open_dialog(c, refresh, portefeuille_id=portefeuille_id)
+
+
+def _refresh_quotes(c, refresh):
+    """Force la mise à jour des cours en arrière-plan."""
+    from services.quotes_updater import update_all_quotes
+    import threading
+
+    ui.notify('🔄 Mise à jour des cours en cours...', type='info', timeout=2000)
+
+    def do_update():
+        try:
+            stats = update_all_quotes(force=True)
+            if stats['updated'] == 0 and stats['errors'] == 0:
+                ui.notify('Aucune position à mettre à jour', type='info')
+            elif stats['errors'] > 0:
+                ui.notify(
+                    f"✅ {stats['updated']} cours mis à jour, "
+                    f"⚠️ {stats['errors']} erreur(s)",
+                    type='warning', timeout=4000
+                )
+            else:
+                ui.notify(
+                    f"✅ {stats['updated']} cours mis à jour",
+                    type='positive'
+                )
+            refresh()
+        except Exception as e:
+            ui.notify(f'❌ Erreur : {e}', type='negative', timeout=5000)
+
+    threading.Thread(target=do_update, daemon=True).start()

@@ -251,3 +251,30 @@ class Position(Base):
             'plus_value': self.plus_value,
             'plus_value_pct': self.plus_value_pct,
         }
+
+
+class CoursHistorique(Base):
+    """Historique quotidien des cours (1 ligne par titre par jour)."""
+    __tablename__ = 'cours_historique'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # Identifiant du titre (ticker Yahoo OU code ISIN)
+    ticker = Column(String(50), nullable=True, index=True)
+    isin = Column(String(50), nullable=True, index=True)
+
+    date_cours = Column(Date, nullable=False, index=True)
+    cours = Column(Float, nullable=False)
+    devise = Column(String(10), default='EUR')
+
+    source = Column(String(20), nullable=True)  # 'yahoo', 'boursorama', 'manual'
+    created_at = Column(DateTime, server_default=func.now())
+
+    def to_dict(self):
+        return {
+            'ticker': self.ticker,
+            'isin': self.isin,
+            'date': self.date_cours.isoformat(),
+            'cours': self.cours,
+            'devise': self.devise,
+        }
