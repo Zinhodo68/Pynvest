@@ -21,7 +21,7 @@ def open_buy_dialog(portefeuille_id, c, refresh):
     state = {'selected': None, 'mode': 'action_etf'}
 
     with get_session() as session:
-        # 🆕 Détection du type de portefeuille pour gérer le Cash / Fonds €
+        # Détection du type de portefeuille pour gérer le Cash / Fonds €
         ptf = session.get(Portefeuille, portefeuille_id)
         is_av_per = ptf.type in ['Assurance-Vie', 'AV', 'PER', 'Assurance Vie']
 
@@ -74,7 +74,7 @@ def open_buy_dialog(portefeuille_id, c, refresh):
             for mode_key, mode_label in [
                 ('action_etf', '📈 Action / ETF / Crypto'),
                 ('opcvm', '💼 OPCVM / SICAV'),
-                ('manual', '✍️ Manuel (SCPI, Fonds €, etc)'),
+                ('manual', '✍️ Manuel (SCPI, etc)'),  # (MODIFIÉ) Retiré "Fonds €" de la description
             ]:
                 btn = ui.button(mode_label).props('dense').style('flex: 1;')
                 mode_buttons[mode_key] = btn
@@ -112,7 +112,7 @@ def open_buy_dialog(portefeuille_id, c, refresh):
         for key, btn in mode_buttons.items():
             btn.on('click', lambda k=key: switch_mode(k))
 
-        # ─── MODE 1 & 2 : RECHERCHE ───
+        # ... (Le code de recherche reste identique) ...
         search_input_ref = {'input': None}
         results_container = ui.column().classes('w-full gap-1').style(
             'max-height: 250px; overflow-y: auto;'
@@ -237,10 +237,9 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                         .classes('flex-1') \
                         .props('placeholder="ex: SCPI Primovie"')
 
-                    # 🆕 Ajout du type "Fonds Euro"
+                    # (MODIFIÉ) Retrait de "Fonds Euro" de la liste des catégories
                     cat_input = ui.select(
                         {
-                            'Fonds Euro': 'Fonds Euro',
                             'SCPI': 'SCPI',
                             'Fonds': 'Fonds / OPCVM',
                             'Action': 'Action',
@@ -287,6 +286,7 @@ def open_buy_dialog(portefeuille_id, c, refresh):
         # ─── FORMULAIRE D'ACHAT ───
         def _render_purchase_form(t):
             form_container.clear()
+            # ... (Début du formulaire identique) ...
             updating = {'value': False}
 
             with form_container:
@@ -415,9 +415,9 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                     price_state['manually_modified'] = False
                     asyncio.create_task(update_price_for_date())
 
-                # 🆕 Sélecteur du Fonds Euro (Visible uniquement pour AV/PER)
+                # Sélecteur du Fonds Euro (Visible uniquement pour AV/PER)
                 source_fonds_input = None
-                if is_av_per and t.get('type') != 'Fonds Euro':
+                if is_av_per:  # (SIMPLIFIÉ) plus besoin de `and t.get('type') != 'Fonds Euro'`
                     if not fonds_euros:
                         ui.label('⚠️ Aucun Fonds € existant pour financer cet achat.').classes(
                             'text-red-500 text-sm font-bold mt-2')
@@ -515,7 +515,8 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                         else:
                             total = m + f
                             warning = ''
-                            if total > cash_dispo and t.get('type') != 'Fonds Euro':
+                            # (SIMPLIFIÉ) plus besoin de `and t.get('type') != 'Fonds Euro'`
+                            if total > cash_dispo:
                                 warning = (f'\n⚠️ Solde insuffisant '
                                            f'({format_money(cash_dispo)} dispo)')
                             summary_label.text = (
@@ -548,6 +549,15 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                             ui.notify('Quantité invalide', type='negative')
                             return
 
+                        # (AJOUTÉ) Sécurité pour bloquer l'achat d'un Fonds Euro
+                        if t.get('type') == 'Fonds Euro':
+                            ui.notify(
+                                "Un Fonds Euro ne peut pas être 'acheté'. "
+                                "Il est alimenté par un versement.",
+                                type='warning'
+                            )
+                            return
+
                         q = float(quantite_input.value)
                         p_unit = float(prix_input.value)
                         if is_action and q != int(q):
@@ -571,33 +581,33 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                         total_eur = montant_titres_eur + frais
 
                         with get_session() as session:
-
-                            # 🆕 VÉRIFICATION DU SOLDE (Cash ou Fonds €)
+                            # VÉRIFICATION DU SOLDE (Cash ou Fonds €)
                             fe_pos = None
-                            if t.get('type') != 'Fonds Euro':  # Si on ne crée pas un fonds euro
-                                if is_av_per:
-                                    if not source_fonds_input or not source_fonds_input.value:
-                                        ui.notify("Veuillez sélectionner un Fonds € source", type='warning')
-                                        return
-                                    fe_id = source_fonds_input.value
-                                    fe_pos = session.get(Position, fe_id)
-                                    cash_now = fe_pos.quantite or 0
-                                else:
-                                    cash = session.execute(
-                                        select(Position).where(
-                                            Position.portefeuille_id == portefeuille_id,
-                                            Position.nom == 'Cash'
-                                        )
-                                    ).scalar_one_or_none()
-                                    cash_now = (cash.quantite if cash else 0) or 0
-
-                                if cash_now < total_eur:
-                                    ui.notify(
-                                        f'Solde insuffisant ({format_money(cash_now)} dispo)',
-                                        type='warning'
-                                    )
+                            # (SIMPLIFIÉ) La condition `if t.get('type') != 'Fonds Euro'` est maintenant toujours vraie
+                            if is_av_per:
+                                if not source_fonds_input or not source_fonds_input.value:
+                                    ui.notify("Veuillez sélectionner un Fonds € source", type='warning')
                                     return
+                                fe_id = source_fonds_input.value
+                                fe_pos = session.get(Position, fe_id)
+                                cash_now = fe_pos.quantite or 0
+                            else:
+                                cash = session.execute(
+                                    select(Position).where(
+                                        Position.portefeuille_id == portefeuille_id,
+                                        Position.nom == 'Cash'
+                                    )
+                                ).scalar_one_or_none()
+                                cash_now = (cash.quantite if cash else 0) or 0
 
+                            if cash_now < total_eur:
+                                ui.notify(
+                                    f'Solde insuffisant ({format_money(cash_now)} dispo)',
+                                    type='warning'
+                                )
+                                return
+
+                            # ... (La suite du code de sauvegarde reste la même mais la logique est plus claire) ...
                             stmt = select(Position).where(
                                 Position.portefeuille_id == portefeuille_id,
                             )
@@ -638,7 +648,9 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                                     cours_actuel=cours_marche,
                                     devise='EUR',
                                     date_ouverture=date_val,
-                                    auto_update=(t.get('source') != 'manual' and t.get('type') != 'Fonds Euro'),
+                                    # (MODIFIÉ) Un fonds euro ajouté manuellement n'a pas de sens ici,
+                                    # mais la logique auto_update reste correcte pour les autres cas manuels.
+                                    auto_update=(t.get('source') != 'manual'),
                                 )
                                 session.add(new_pos)
 
@@ -658,27 +670,26 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                             session.add(tx_achat)
                             session.flush()
 
-                            # 🆕 PAIEMENT / DÉDUCTION DU SOLDE
-                            if t.get('type') != 'Fonds Euro':
-                                if is_av_per:
-                                    fe_pos.quantite -= total_eur
+                            # PAIEMENT / DÉDUCTION DU SOLDE
+                            if is_av_per:
+                                fe_pos.quantite -= total_eur
 
-                                    tx_vente_fe = Transaction(
-                                        portefeuille_id=portefeuille_id,
-                                        date_operation=date_val,
-                                        type_operation='vente',
-                                        montant=montant_titres_eur,
-                                        libelle=f'Arbitrage vers {t["name"][:30]}',
-                                        nom_titre=fe_pos.nom,
-                                        categorie='Fonds Euro',
-                                        quantite=montant_titres_eur,
-                                        prix_unitaire=1.0,
-                                        parent_transaction_id=tx_achat.id
-                                    )
-                                    session.add(tx_vente_fe)
-                                else:
-                                    ajuster_cash(session, portefeuille_id,
-                                                 impact_cash('achat', montant_titres_eur))
+                                tx_vente_fe = Transaction(
+                                    portefeuille_id=portefeuille_id,
+                                    date_operation=date_val,
+                                    type_operation='vente',
+                                    montant=montant_titres_eur,
+                                    libelle=f'Arbitrage vers {t["name"][:30]}',
+                                    nom_titre=fe_pos.nom,
+                                    categorie='Fonds Euro',
+                                    quantite=montant_titres_eur,
+                                    prix_unitaire=1.0,
+                                    parent_transaction_id=tx_achat.id
+                                )
+                                session.add(tx_vente_fe)
+                            else:
+                                ajuster_cash(session, portefeuille_id,
+                                             impact_cash('achat', montant_titres_eur))
 
                             if frais > 0:
                                 tx_frais = Transaction(
@@ -690,7 +701,8 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                                     parent_transaction_id=tx_achat.id,
                                 )
                                 session.add(tx_frais)
-                                if not is_av_per and t.get('type') != 'Fonds Euro':
+                                # (SIMPLIFIÉ) `and t.get('type') != 'Fonds Euro'` est redondant
+                                if not is_av_per:
                                     ajuster_cash(session, portefeuille_id,
                                                  impact_cash('frais', frais))
 
