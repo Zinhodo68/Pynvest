@@ -138,8 +138,8 @@ def backfill_valorisations(portefeuille_id: int) -> int:
 
         created = 0
         cash = 0.0
-        # Positions détenues par ticker : {ticker: {'quantite': X, 'pru': Y, 'nom': Z, 'categorie': C}}
-        # Pour les titres sans ticker, on utilise une clé alternative
+        # Positions détenues par clé : {clé: {'ticker': T, 'quantite': X, 'pru': Y, 'nom': Z, 'categorie': C}}
+        # Clé = ticker (pour titres cotés) ou nom_titre (pour Fonds Euro, manuels, etc.)
         positions_held = {}
         tx_index = 0
         current_date = start_date
@@ -149,16 +149,80 @@ def backfill_valorisations(portefeuille_id: int) -> int:
             while tx_index < len(transactions) and transactions[tx_index].date_operation <= current_date:
                 t = transactions[tx_index]
 
+                # Déterminer la clé pour la position
+                key = t.ticker or t.code or t.nom_titre
+                # Si pas de clé spécifique, c'est un flux de cash général
+                is_asset_specific_tx = bool(key and t.quantite is not None)
+
                 if t.type_operation == 'versement':
-                    cash += t.montant
+                    if is_asset_specific_tx: # Versement dans un actif spécifique (ex: Fonds Euro)
+                        if key in positions_held:
+                            positions_held[key]['quantite'] += t.quantite
+                            # Le PRU ne change généralement pas pour les versements (surtout Fonds Euro)
+                        else:
+                            positions_held[key] = {
+                                'ticker': t.ticker,
+                                'quantite': t.quantite,
+                                'pru': t.prix_unitaire if t.prix_unitaire is not None else 1.0,
+                                'nom': t.nom_titre,
+                                'categorie': t.categorie,
+                            }
+                    else: # Versement de cash général
+                        cash += t.montant
                 elif t.type_operation == 'retrait':
-                    cash -= t.montant
+                    if is_asset_specific_tx: # Retrait d'un actif spécifique
+                        if key in positions_held:
+                            positions_held[key]['quantite'] -= t.quantite
+                    else: # Retrait de cash général
+                        cash -= t.montant
+                elif t.type_operation == 'interets': # Intérêts réinvestis ou en cash
+                    if is_asset_specific_tx: # Intérêts réinvestis dans l'actif
+                        if key in positions_held:
+                            positions_held[key]['quantite'] += t.quantite
+                            # Le PRU sera ajusté par les dividendes réinvestis, mais les intérêts
+                            # simples n'impactent pas le PRU unitaire d'un fonds euro par exemple
+                            # le PRU reste 1.0. Si c'est un autre type d'actif, la logique PRU est plus complexe.
+                            # Pour la simplification actuelle, on ajoute juste la quantité.
+                        else: # Si l'actif n'existe pas encore (cas limite)
+                             positions_held[key] = {
+                                'ticker': t.ticker,
+                                'quantite': t.quantite,
+                                'pru': t.prix_unitaire if t.prix_unitaire is not None else 1.0,
+                                'nom': t.nom_titre,
+                                'categorie': t.categorie,
+                            }
+                    else: # Intérêts versés en cash
+                        cash += t.montant
+                elif t.type_operation == 'dividende': # Dividendes réinvestis ou en cash
+                    if is_asset_specific_tx: # Dividende réinvesti dans l'actif
+                        if key in positions_held:
+                            old = positions_held[key]
+                            new_qte = old['quantite'] + t.quantite
+                            new_pru = (
+                                              (old['quantite'] * old['pru']) +
+                                              (t.quantite * t.prix_unitaire)
+                                      ) / new_qte if new_qte > 0 else 0
+                            old['quantite'] = new_qte
+                            old['pru'] = new_pru
+                        else:
+                            positions_held[key] = {
+                                'ticker': t.ticker,
+                                'quantite': t.quantite,
+                                'pru': t.prix_unitaire,
+                                'nom': t.nom_titre,
+                                'categorie': t.categorie,
+                            }
+                    else: # Dividende versé en cash
+                        cash += t.montant
                 elif t.type_operation == 'frais':
-                    cash -= t.montant
+                    if is_asset_specific_tx: # Frais en parts d'un actif spécifique
+                        if key in positions_held:
+                            positions_held[key]['quantite'] -= t.quantite
+                    else: # Frais en euros (impactent le cash)
+                        cash -= t.montant
                 elif t.type_operation == 'achat':
+                    # L'achat réduit le cash et augmente la position
                     cash -= t.montant
-                    # Mise à jour de la position
-                    key = t.ticker or t.code or t.nom_titre or 'inconnu'
                     if t.quantite is not None and t.prix_unitaire is not None:
                         if key in positions_held:
                             old = positions_held[key]
@@ -178,12 +242,12 @@ def backfill_valorisations(portefeuille_id: int) -> int:
                                 'categorie': t.categorie,
                             }
                 elif t.type_operation == 'vente':
+                    # La vente augmente le cash et réduit la position
                     cash += t.montant
-                    key = t.ticker or t.code or t.nom_titre or 'inconnu'
                     if t.quantite is not None and key in positions_held:
                         positions_held[key]['quantite'] -= t.quantite
-                        # Si la quantité tombe à 0, on peut garder l'entrée à 0
-                        # (ça n'impacte pas la valo)
+                        # On pourrait ajuster le PRU si c'est une vente partielle, mais le modèle actuel
+                        # du backfill n'ajuste pas le PRU à la vente. La "position" est juste la quantité restante.
 
                 tx_index += 1
 
@@ -200,10 +264,10 @@ def backfill_valorisations(portefeuille_id: int) -> int:
                     if cours is not None:
                         valo_titres += qte * cours
                     else:
-                        # Fallback : PRU
+                        # Fallback : PRU si pas de cours (ou Fonds Euro dont le PRU est le cours)
                         valo_titres += qte * pos['pru']
                 else:
-                    # Pas de ticker : on utilise toujours le PRU (OPCVM, SCPI)
+                    # Pas de ticker : on utilise toujours le PRU (OPCVM, SCPI, Fonds Euro)
                     valo_titres += qte * pos['pru']
 
             valo_totale = cash + valo_titres

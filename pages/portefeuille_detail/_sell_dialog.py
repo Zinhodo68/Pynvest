@@ -5,7 +5,7 @@ from nicegui import ui
 from sqlalchemy import select
 
 from database.db import get_session
-from database.models import Position, Transaction
+from database.models import Position, Transaction, Portefeuille  # Import de Portefeuille
 from utils.formatters import format_money, format_percent, get_perf_color
 from services.market_data import (
     get_current_price_with_currency,
@@ -18,8 +18,13 @@ from pages.portefeuille_detail._cash_helpers import impact_cash, ajuster_cash
 def open_sell_dialog(portefeuille_id, c, refresh):
     """Dialogue de vente d'une position détenue."""
 
-    # Récupérer toutes les positions vendables (hors Cash)
     with get_session() as session:
+        portefeuille = session.get(Portefeuille, portefeuille_id)  # Récupérer le portefeuille
+        if not portefeuille:
+            ui.notify("Portefeuille introuvable", type='negative')
+            return
+
+        # Récupérer toutes les positions vendables (hors Cash)
         positions = session.execute(
             select(Position).where(
                 Position.portefeuille_id == portefeuille_id,
@@ -29,17 +34,31 @@ def open_sell_dialog(portefeuille_id, c, refresh):
         ).scalars().all()
         positions_data = [p.to_dict() for p in positions]
 
+        # Récupérer les Fonds Euro si c'est une Assurance-Vie ou un PER
+        fonds_euro_positions = []
+        if portefeuille.type in ['Assurance-Vie', 'PER']:  # <-- MODIFIÉ pour inclure 'PER'
+            fonds_euro_positions = session.execute(
+                select(Position).where(
+                    Position.portefeuille_id == portefeuille_id,
+                    Position.categorie == 'Fonds Euro',
+                    Position.quantite > 0  # Seulement les Fonds Euro avec une quantité > 0
+                ).order_by(Position.nom)
+            ).scalars().all()
+
     if not positions_data:
         ui.notify("Aucune position à vendre dans ce portefeuille",
                   type='warning')
         return
 
-    state = {'selected_pos': None}
+    state = {
+        'selected_pos': None,
+        'selected_fonds_euro_id': None  # Pour stocker le choix du Fonds Euro
+    }
 
     with ui.dialog() as dialog, ui.card().classes('p-6 gap-3').style(
-        f'background-color: {c["card_bg"]}; '
-        f'border: 1px solid {c["card_border"]}; '
-        f'min-width: 600px; max-width: 700px;'
+            f'background-color: {c["card_bg"]}; '
+            f'border: 1px solid {c["card_border"]}; '
+            f'min-width: 600px; max-width: 700px;'
     ):
         ui.label('💹 Vendre un titre').classes('text-xl font-bold').style(
             f'color: {c["text_primary"]}'
@@ -84,8 +103,8 @@ def open_sell_dialog(portefeuille_id, c, refresh):
             with form_container:
                 # ── Récap de la position ──
                 with ui.card().classes('w-full p-4 rounded-lg').style(
-                    f'background-color: {c["card_border"]}30; '
-                    f'border: 1px solid {c["card_border"]};'
+                        f'background-color: {c["card_border"]}30; '
+                        f'border: 1px solid {c["card_border"]};'
                 ):
                     with ui.row().classes('w-full items-center justify-between'):
                         with ui.column().classes('gap-0'):
@@ -116,18 +135,18 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                             ).style(f'color: {c["text_secondary"]}')
                             ui.label(format_money(pos['prix_moyen'], decimals=2)) \
                                 .classes('text-base font-bold').style(
-                                    f'color: {c["text_primary"]}'
-                                )
+                                f'color: {c["text_primary"]}'
+                            )
 
                         with ui.column().classes('gap-0').style('flex: 1;'):
                             ui.label('COURS ACTUEL').classes(
                                 'text-xs font-semibold tracking-wider'
                             ).style(f'color: {c["text_secondary"]}')
                             ui.label(format_money(pos['cours_actuel'] or 0,
-                                                    decimals=2)) \
+                                                  decimals=2)) \
                                 .classes('text-base font-bold').style(
-                                    f'color: {c["text_primary"]}'
-                                )
+                                f'color: {c["text_primary"]}'
+                            )
 
                 # ── Formulaire ──
                 # 🆕 Détecter la source du cours pour cette position
@@ -300,6 +319,29 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                         format='%.2f', min=0
                     ).classes('flex-1')
 
+                # 🆕 Pour les Assurance-Vie/PER, un sélecteur de Fonds Euro
+                if portefeuille.type in ['Assurance-Vie', 'PER']:  # <-- MODIFIÉ
+                    ui.label('Destination du produit de la vente').classes('text-sm font-medium mt-2').style(
+                        f'color: {c["text_secondary"]}'
+                    )
+                    fonds_euro_options = {
+                        f.id: f"{f.nom} ({format_money(f.quantite * f.prix_moyen, decimals=2)})"
+                        for f in fonds_euro_positions
+                    }
+                    if fonds_euro_options:
+                        fonds_euro_select = ui.select(
+                            fonds_euro_options,
+                            label='Sélectionnez un Fonds Euro de destination *',
+                            on_change=lambda e: state.update(selected_fonds_euro_id=e.value)
+                        ).classes('w-full')
+                        # Pré-sélectionner le premier Fonds Euro si disponible
+                        if fonds_euro_positions:
+                            fonds_euro_select.value = fonds_euro_positions[0].id
+                            state['selected_fonds_euro_id'] = fonds_euro_positions[0].id
+                    else:
+                        ui.label("⚠️ Aucun Fonds Euro actif pour cet Assurance-Vie/PER.").classes(
+                            'text-xs text-red-500')  # <-- MODIFIÉ
+
                 # ── Bouton "Tout vendre" ──
                 with ui.row().classes('w-full justify-end'):
                     def sell_all():
@@ -313,8 +355,8 @@ def open_sell_dialog(portefeuille_id, c, refresh):
 
                     ui.button('🎯 Tout vendre', on_click=sell_all) \
                         .props('flat dense').style(
-                            f'color: {c["text_secondary"]}; font-size: 0.75rem;'
-                        )
+                        f'color: {c["text_secondary"]}; font-size: 0.75rem;'
+                    )
 
                 # ── Synchronisation ──
                 def update_montant_from_qte():
@@ -348,9 +390,9 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                         pass
 
                 quantite_input.on('update:model-value',
-                                    lambda _: update_montant_from_qte())
+                                  lambda _: update_montant_from_qte())
                 montant_input.on('update:model-value',
-                                   lambda _: update_qte_from_montant())
+                                 lambda _: update_qte_from_montant())
                 # 🆕 Remplacement : on utilise on_price_change au lieu d'une lambda
                 prix_input.on('update:model-value', on_price_change)
                 frais_input.on('update:model-value', lambda _: update_summary())
@@ -399,6 +441,10 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                             f'({format_percent(pv_pct)})'
                             f'{warning}'
                         )
+                        if portefeuille.type in ['Assurance-Vie', 'PER'] and not state['selected_fonds_euro_id'] and (
+                                q > 0 or f > 0):  # <-- MODIFIÉ
+                            summary_label.text += "\n\n🚨 Choisissez un Fonds Euro de destination !"
+
                     except (TypeError, ValueError):
                         summary_label.text = '💡 Saisissez quantité ou montant'
 
@@ -443,6 +489,12 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                             )
                             return
 
+                        # Validation spécifique Assurance-Vie / PER
+                        if portefeuille.type in ['Assurance-Vie', 'PER'] and not state[
+                            'selected_fonds_euro_id']:  # <-- MODIFIÉ
+                            ui.notify('Veuillez sélectionner un Fonds Euro de destination.', type='negative')
+                            return
+
                         montant_brut = q * p_unit
                         montant_net = montant_brut - frais
 
@@ -453,7 +505,7 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                                 ui.notify('Position introuvable', type='negative')
                                 return
 
-                            # MAJ ou suppression de la position
+                            # MAJ ou suppression de la position du titre vendu
                             new_qty = (position.quantite or 0) - q
                             if new_qty <= 0.0001:  # Vente totale (tolérance)
                                 session.delete(position)
@@ -461,12 +513,12 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                                 position.quantite = new_qty
                                 # Le PRU reste INCHANGÉ après une vente partielle
 
-                            # 🆕 Transaction enrichie avec les nouveaux champs
+                            # 🆕 Transaction enrichie avec les nouveaux champs pour la vente
                             tx_vente = Transaction(
                                 portefeuille_id=portefeuille_id,
                                 date_operation=date_val,
                                 type_operation='vente',
-                                montant=montant_brut,
+                                montant=montant_brut,  # Montant brut de la vente (avant frais)
                                 libelle=f'Vente {q:g} × {pos["nom"][:30]}',
                                 ticker=pos.get('ticker'),
                                 code=pos.get('code'),
@@ -476,29 +528,78 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                                 prix_unitaire=p_unit,
                             )
                             session.add(tx_vente)
-                            session.flush()
+                            session.flush()  # Flush pour obtenir l'ID de tx_vente si nécessaire pour parent_transaction_id
 
-                            # Crédit du cash
-                            ajuster_cash(
-                                session, portefeuille_id,
-                                impact_cash('vente', montant_brut)
-                            )
+                            # --- GESTION DU FLUX DE TRÉSORERIE DE LA VENTE ---
+                            if portefeuille.type in ['Assurance-Vie', 'PER']:  # <-- MODIFIÉ
+                                # Récupérer le Fonds Euro de destination
+                                fonds_euro_cible = session.get(Position, state['selected_fonds_euro_id'])
+                                if not fonds_euro_cible:
+                                    ui.notify("Fonds Euro de destination introuvable", type='negative')
+                                    session.rollback()  # Annuler les changements
+                                    return
 
-                            # Frais liés
-                            if frais > 0:
-                                tx_frais = Transaction(
+                                # Créer une transaction de versement dans le Fonds Euro
+                                tx_versement_fonds_euro = Transaction(
                                     portefeuille_id=portefeuille_id,
                                     date_operation=date_val,
-                                    type_operation='frais',
-                                    montant=frais,
-                                    libelle=f'Frais vente - {pos["nom"][:30]}',
-                                    parent_transaction_id=tx_vente.id,
+                                    type_operation='versement',  # Marque comme versement
+                                    montant=montant_brut,  # Montant de la vente
+                                    libelle=f'Arbitrage IN (produit de vente {pos["nom"][:20]}) vers {fonds_euro_cible.nom[:20]}',
+                                    nom_titre=fonds_euro_cible.nom,
+                                    categorie=fonds_euro_cible.categorie,
+                                    quantite=montant_brut / fonds_euro_cible.prix_moyen if fonds_euro_cible.prix_moyen > 0 else 0,
+                                    prix_unitaire=fonds_euro_cible.prix_moyen,
+                                    parent_transaction_id=tx_vente.id,  # Lier à la transaction de vente
                                 )
-                                session.add(tx_frais)
+                                session.add(tx_versement_fonds_euro)
+
+                                # Mettre à jour la position du Fonds Euro directement
+                                fonds_euro_cible.quantite += (
+                                    montant_brut / fonds_euro_cible.prix_moyen if fonds_euro_cible.prix_moyen > 0 else 0)
+
+                                # Frais liés (si > 0) : impacts le Fonds Euro, pas le cash global
+                                if frais > 0:
+                                    tx_frais_fonds_euro = Transaction(
+                                        portefeuille_id=portefeuille_id,
+                                        date_operation=date_val,
+                                        type_operation='frais',
+                                        montant=frais,
+                                        libelle=f'Frais vente {pos["nom"][:20]} (déduits de {fonds_euro_cible.nom[:20]})',
+                                        nom_titre=fonds_euro_cible.nom,
+                                        categorie=fonds_euro_cible.categorie,
+                                        # Si frais en parts, calculer la quantité
+                                        quantite=frais / fonds_euro_cible.prix_moyen if fonds_euro_cible.prix_moyen > 0 else 0,
+                                        prix_unitaire=fonds_euro_cible.prix_moyen,
+                                        parent_transaction_id=tx_vente.id,
+                                    )
+                                    session.add(tx_frais_fonds_euro)
+                                    # Mettre à jour la position du Fonds Euro pour les frais
+                                    fonds_euro_cible.quantite -= (
+                                        frais / fonds_euro_cible.prix_moyen if fonds_euro_cible.prix_moyen > 0 else 0)
+
+                            else:  # Comportement par défaut pour les autres types de portefeuilles (ajout au cash)
+                                # Crédit du cash
                                 ajuster_cash(
                                     session, portefeuille_id,
-                                    impact_cash('frais', frais)
+                                    impact_cash('vente', montant_brut)
                                 )
+
+                                # Frais liés
+                                if frais > 0:
+                                    tx_frais = Transaction(
+                                        portefeuille_id=portefeuille_id,
+                                        date_operation=date_val,
+                                        type_operation='frais',
+                                        montant=frais,
+                                        libelle=f'Frais vente - {pos["nom"][:30]}',
+                                        parent_transaction_id=tx_vente.id,
+                                    )
+                                    session.add(tx_frais)
+                                    ajuster_cash(
+                                        session, portefeuille_id,
+                                        impact_cash('frais', frais)
+                                    )
 
                             session.commit()
 
