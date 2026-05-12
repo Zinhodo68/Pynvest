@@ -301,7 +301,14 @@ def _stat_block(label, value, c, color=None):
 # Dialogue création/édition
 # ─────────────────────────────────────────────
 
+# ─────────────────────────────────────────────
+# Dialogue création/édition
+# ─────────────────────────────────────────────
+
 def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int = None):
+    # 🆕 Ajout de l'import Position pour créer les Fonds €
+    from database.models import Position
+
     is_edit = portefeuille_id is not None
     data = {
         'type': 'PEA', 'etablissement': '',
@@ -309,11 +316,27 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
         'notes': '', 'proprietaire_id': default_membre_id,
     }
 
+    # Stockage des fonds euros existants si on est en édition
+    fonds_euros_existants = []
+
     if is_edit:
         with get_session() as session:
             p = session.get(Portefeuille, portefeuille_id)
             if p:
                 data = p.to_dict()
+                # On récupère les fonds euros existants (max 2 attendus)
+                if p.type in ['Assurance-Vie', 'AV', 'PER', 'Assurance Vie']:
+                    fe_db = session.execute(
+                        select(Position).where(
+                            Position.portefeuille_id == portefeuille_id,
+                            Position.categorie == 'Fonds Euro'
+                        ).order_by(Position.id)
+                    ).scalars().all()
+                    for fe in fe_db:
+                        fonds_euros_existants.append({
+                            'id': fe.id,
+                            'nom': fe.nom
+                        })
 
     membres = get_all_membres()
     membre_options = {m['id']: f'{m["prenom"]} {m["nom"]}' for m in membres}
@@ -325,18 +348,15 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
             data['date_creation']
         ).strftime('%d/%m/%Y')
 
-    # ✅ État du logo : on stocke directement le nom du fichier final
-    # 'filename' = ce qui sera enregistré en BDD au save
-    # 'old_filename' = ancien fichier à supprimer si on a uploadé un nouveau ou retiré
     logo_state = {
         'filename': data['logo_path'],
         'old_filename': data['logo_path'] if is_edit else None,
     }
 
     with ui.dialog() as dialog, ui.card().classes('p-6 gap-4').style(
-        f'background-color: {c["card_bg"]}; '
-        f'border: 1px solid {c["card_border"]}; '
-        f'min-width: 500px; max-width: 600px;'
+            f'background-color: {c["card_bg"]}; '
+            f'border: 1px solid {c["card_border"]}; '
+            f'min-width: 500px; max-width: 600px;'
     ):
         ui.label('Modifier le portefeuille' if is_edit else 'Nouveau portefeuille') \
             .classes('text-xl font-bold').style(f'color: {c["text_primary"]}')
@@ -364,6 +384,44 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
             f'background-color: {c["card_border"]}; color: {c["text_primary"]};'
         )
 
+        # 🆕 --- GESTION DES FONDS EUROS ---
+        fonds_euro_container = ui.column().classes('w-full gap-2 p-3 rounded-lg').style(
+            f'background-color: {c["card_border"]}30; border: 1px dashed {c["card_border"]};'
+        )
+        fonds_euro_inputs = {}
+
+        def update_fonds_euros_ui():
+            fonds_euro_container.clear()
+            type_val = type_input.value or ''
+            is_av_per = type_val in ['Assurance-Vie', 'AV', 'PER', 'Assurance Vie']
+
+            if is_av_per:
+                fonds_euro_container.set_visibility(True)
+                with fonds_euro_container:
+                    ui.label('💶 Configuration des Fonds Euros').classes('text-sm font-bold').style(
+                        f'color: {c["text_primary"]}')
+                    ui.label(
+                        'Saisissez le nom de vos Fonds €. Laissez vide si vous n\'en avez pas ou qu\'un seul.').classes(
+                        'text-xs').style(f'color: {c["text_secondary"]}')
+
+                    # Récupération des valeurs existantes
+                    nom_1 = fonds_euros_existants[0]['nom'] if len(fonds_euros_existants) > 0 else 'Fonds Euro'
+                    nom_2 = fonds_euros_existants[1]['nom'] if len(fonds_euros_existants) > 1 else ''
+
+                    fonds_euro_inputs['fe_1'] = ui.input('Nom du Fonds € n°1', value=nom_1).classes('w-full').props(
+                        'placeholder="ex: Suravenir Rendement"')
+                    fonds_euro_inputs['fe_2'] = ui.input('Nom du Fonds € n°2 (Optionnel)', value=nom_2).classes(
+                        'w-full').props('placeholder="ex: Suravenir Opportunités"')
+
+                    if is_edit and len(fonds_euros_existants) > 0:
+                        ui.label('ℹ️ La modification du nom ici mettra à jour la position existante.').classes(
+                            'text-xs italic mt-1').style(f'color: {c["text_secondary"]}')
+            else:
+                fonds_euro_container.set_visibility(False)
+                fonds_euro_inputs.clear()
+
+        # -----------------------------------
+
         def update_preview():
             type_val = type_input.value or '...'
             prop_id = proprietaire_input.value
@@ -374,6 +432,8 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
                 preview_label.text = f'📋 Nom affiché : {type_val} — {prop_name}'
             else:
                 preview_label.text = f'📋 Nom affiché : {type_val}'
+
+            update_fonds_euros_ui()  # On met à jour l'affichage des Fonds €
 
         update_preview()
         type_input.on('update:model-value', lambda _: update_preview())
@@ -405,15 +465,13 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
         # ── Logo : upload direct sur disque ──
         ui.label('Logo de l\'établissement').style(f'color: {c["text_secondary"]}')
 
-        # Container avec preview + bouton d'upload + bouton retirer
         logo_container = ui.row().classes('items-center gap-4 w-full')
 
         def render_logo_zone():
             logo_container.clear()
             with logo_container:
-                # Preview
                 with ui.element('div').classes(
-                    'rounded-lg flex items-center justify-center overflow-hidden'
+                        'rounded-lg flex items-center justify-center overflow-hidden'
                 ).style(
                     f'width: 64px; height: 64px; background-color: white; '
                     f'border: 1px solid {c["card_border"]};'
@@ -429,7 +487,6 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
                             f'color: {c["text_secondary"]}'
                         )
 
-                # Bouton + retirer
                 with ui.column().classes('gap-1 flex-1'):
                     upload = ui.upload(
                         on_upload=handle_upload,
@@ -443,15 +500,11 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
                     if logo_state['filename']:
                         ui.button('Retirer le logo', on_click=remove_logo) \
                             .props('flat dense').style(
-                                'color: #ef4444; font-size: 0.75rem;'
-                            )
+                            'color: #ef4444; font-size: 0.75rem;'
+                        )
 
         async def handle_upload(e: events.UploadEventArguments):
-            """Sauvegarde directement le fichier sur disque (NiceGUI v3+)."""
-            # Le fichier uploadé est maintenant dans e.file
             uploaded_file = e.file
-
-            # Récupération du nom du fichier
             filename = getattr(uploaded_file, 'filename', 'upload.png')
             if not filename:
                 filename = getattr(uploaded_file, 'name', 'upload.png')
@@ -461,9 +514,7 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
                 ui.notify('Format non supporté (png, jpg, svg, webp)', type='negative')
                 return
 
-            # Lecture asynchrone du fichier
             content = await uploaded_file.read()
-
             if isinstance(content, str):
                 content = content.encode()
 
@@ -471,7 +522,6 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
                 ui.notify('Fichier vide', type='negative')
                 return
 
-            # Sauvegarde avec UUID
             new_filename = f'{uuid.uuid4().hex}.{ext}'
             file_path = UPLOADS_DIR / new_filename
             try:
@@ -480,7 +530,6 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
                 ui.notify(f'Erreur sauvegarde : {ex}', type='negative')
                 return
 
-            # Nettoyage si on avait déjà uploadé un logo pendant cette session
             previous = logo_state['filename']
             if previous and previous != logo_state['old_filename']:
                 old = UPLOADS_DIR / previous
@@ -492,7 +541,6 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
             render_logo_zone()
 
         def remove_logo():
-            # Si c'est un logo qui vient d'être uploadé (pas encore sauvé en BDD), on supprime
             if logo_state['filename'] and logo_state['filename'] != logo_state['old_filename']:
                 f = UPLOADS_DIR / logo_state['filename']
                 if f.exists():
@@ -509,7 +557,6 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
 
         with ui.row().classes('w-full justify-end gap-2 mt-4'):
             def cancel():
-                # Si on a uploadé un nouveau logo sans valider, on le supprime
                 if (logo_state['filename']
                         and logo_state['filename'] != logo_state['old_filename']):
                     f = UPLOADS_DIR / logo_state['filename']
@@ -542,7 +589,6 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
                         )
                         return
 
-                # Si on avait un ancien logo et qu'on l'a remplacé/retiré, on le supprime
                 if (logo_state['old_filename']
                         and logo_state['old_filename'] != logo_state['filename']):
                     old = UPLOADS_DIR / logo_state['old_filename']
@@ -550,6 +596,7 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
                         old.unlink()
 
                 with get_session() as session:
+                    # Sauvegarde du Portefeuille
                     if is_edit:
                         p = session.get(Portefeuille, portefeuille_id)
                         p.type = type_input.value
@@ -570,6 +617,43 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
                             proprietaire_id=proprietaire_input.value,
                         )
                         session.add(p)
+                        session.flush()  # Pour avoir le p.id
+
+                    # 🆕 Sauvegarde des Fonds Euros
+                    is_av_per = p.type in ['Assurance-Vie', 'AV', 'PER', 'Assurance Vie']
+
+                    if is_av_per and fonds_euro_inputs:
+                        noms_saisis = []
+                        if fonds_euro_inputs['fe_1'].value and fonds_euro_inputs['fe_1'].value.strip():
+                            noms_saisis.append(fonds_euro_inputs['fe_1'].value.strip())
+                        if fonds_euro_inputs['fe_2'].value and fonds_euro_inputs['fe_2'].value.strip():
+                            noms_saisis.append(fonds_euro_inputs['fe_2'].value.strip())
+
+                        # Création ou MAJ
+                        for i, nom in enumerate(noms_saisis):
+                            if is_edit and i < len(fonds_euros_existants):
+                                # Mise à jour d'un FE existant
+                                fe = session.get(Position, fonds_euros_existants[i]['id'])
+                                if fe:
+                                    fe.nom = nom
+                            else:
+                                # Création d'un nouveau FE
+                                new_fe = Position(
+                                    portefeuille_id=p.id,
+                                    nom=nom,
+                                    categorie='Fonds Euro',
+                                    quantite=0.0,
+                                    prix_moyen=1.0,
+                                    cours_actuel=1.0,
+                                    devise='EUR',
+                                    date_ouverture=date_val or date.today(),
+                                    auto_update=False
+                                )
+                                session.add(new_fe)
+
+                        # (Optionnel) : Gérer la suppression d'un FE si l'utilisateur a effacé le champ
+                        # Non implémenté ici pour éviter de supprimer accidentellement un FE avec de l'argent dessus
+
                     session.commit()
 
                 ui.notify(

@@ -275,7 +275,6 @@ Ajouts : get_yahoo_history(), get_yahoo_price_at_date(), refonte backfill v1, fo
 
 Session 2 (J) — Refonte historique
 Problèmes résolus :
-
 PRU auto à la vente (avec détection auto de la source)
 Graphique cassé après vente (positions supprimées de la BDD)
 Architecture limitée : Transaction ne stockait pas les détails
@@ -292,35 +291,33 @@ Approche C+ hybride : Position = état actuel, Transaction = historique
 Modèle Transaction étendu mais nullable pour rester compatible avec versement/retrait/frais
 
 
-TODO Session 3 :
-Modélisation des Fonds € (avec type de transaction interets)
+Session 3 (J) — Ajout des fond €(début)
+Problèmes résolus : A la création d'une Assurance-Vie (AV) ou d'un PER (2 seuls uniques portefeuilles a avoir des Assurances-Vie)
+on mentionne le ou les fond € qui seront utilisés dans le portefeuille.
+
+Quand on fait un versement sur un portfeuille de type AV ou PER, on verse directement sur le fond € si il y en a 1 ou 1 des 2 AV si il y en a 2
+
+TODO suite - Session 3 :
+Gestion des interets des AV
 Système de revalorisation pour SCPI
-Gestion de plusieurs fonds € dans un même portefeuille
 
 On a commencé a travailler dessus en répondant aux questions suivantes permettant d'orienter le code:
 
-Q1 - Quels types de portefeuille peuvent contenir des Fonds € ?
-R1 - Uniquement Assurance-Vie (AV) et PER
+Q - Workflow de saisie des intérêts annuels - ton assureur t'annonce que ton fonds € a fait +2,5% sur l'année 2025. Comment tu veux le saisir ?
+R - On saisie en € en fin d'année
 
-Q2 - Workflow de saisie des intérêts annuels - ton assureur t'annonce que ton fonds € a fait +2,5% sur l'année 2025. Comment tu veux le saisir ?
-R2 - On saisie en € en fin d'année
+Q - Date de versement des intérêts ?
+R - Date par défaut = 31/12 de l'année concernée, modifiable
 
-Q3 - Date de versement des intérêts ?
-R3 - Date par défaut = 31/12 de l'année concernée, modifiable
-
-Q4 - Saisie des SCPI
+Q - Saisie des SCPI
 Pour les SCPI, la distribution se fait en general en €sur le fond €.
 Pour les ETF et les OPCVM ,ca depend si ils sont capitalisant ou distribuant. Il faut donc pouvoir savoir les interets en €(ca va sur le fond €) ou en parts (ca va augmenter le nb de parts du support).
 LEs frais sur ces supports peuvent egalement etre en € ou en parts (retirées du nb de parts possedées)
 
-Q5 - Comment l'application doit savoir qu'une position est un fonds € et pas une UC classique ?
-R5 - Via une nouvelle valeur de categorie : 'Fonds Euro' (en plus de Action, ETF, OPCVM, etc.)
-
 proposition de scope pour cette session
 Vu la complexité, je propose de séparer en sous-sessions :
 
-Session 3a (aujourd'hui) — Fonds € basiques
-Nouvelle catégorie 'Fonds Euro'
+Session 3a — 
 Type de transaction interets (saisie en €)
 Saisie annuelle des intérêts
 Backfill qui en tient compte
