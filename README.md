@@ -290,11 +290,55 @@ Décisions architecturales :
 
 Approche C+ hybride : Position = état actuel, Transaction = historique
 Modèle Transaction étendu mais nullable pour rester compatible avec versement/retrait/frais
-TODO Session 3 :
 
+
+TODO Session 3 :
 Modélisation des Fonds € (avec type de transaction interets)
 Système de revalorisation pour SCPI
 Gestion de plusieurs fonds € dans un même portefeuille
+
+On a commencé a travailler dessus en répondant aux questions suivantes permettant d'orienter le code:
+
+Q1 - Quels types de portefeuille peuvent contenir des Fonds € ?
+R1 - Uniquement Assurance-Vie (AV) et PER
+
+Q2 - Workflow de saisie des intérêts annuels - ton assureur t'annonce que ton fonds € a fait +2,5% sur l'année 2025. Comment tu veux le saisir ?
+R2 - On saisie en € en fin d'année
+
+Q3 - Date de versement des intérêts ?
+R3 - Date par défaut = 31/12 de l'année concernée, modifiable
+
+Q4 - Saisie des SCPI
+Pour les SCPI, la distribution se fait en general en €sur le fond €.
+Pour les ETF et les OPCVM ,ca depend si ils sont capitalisant ou distribuant. Il faut donc pouvoir savoir les interets en €(ca va sur le fond €) ou en parts (ca va augmenter le nb de parts du support).
+LEs frais sur ces supports peuvent egalement etre en € ou en parts (retirées du nb de parts possedées)
+
+Q5 - Comment l'application doit savoir qu'une position est un fonds € et pas une UC classique ?
+R5 - Via une nouvelle valeur de categorie : 'Fonds Euro' (en plus de Action, ETF, OPCVM, etc.)
+
+proposition de scope pour cette session
+Vu la complexité, je propose de séparer en sous-sessions :
+
+Session 3a (aujourd'hui) — Fonds € basiques
+Nouvelle catégorie 'Fonds Euro'
+Type de transaction interets (saisie en €)
+Saisie annuelle des intérêts
+Backfill qui en tient compte
+Test sur un portefeuille AV simple
+Session 3b (plus tard) — SCPI + Distributions
+Nouvelle catégorie 'SCPI' (si pas déjà gérée)
+Type de transaction distribution_eur
+Logique : "destinataire fonds €" (Option C avec fonds € par défaut)
+Saisie manuelle des revalorisations SCPI
+Session 3c (encore plus tard) — Distributions/frais en parts
+Type de transaction distribution_parts et frais_parts
+Logique d'impact sur quantité/PRU
+Tests OPCVM/ETF distribuants
+
+
+
+
+
 💡 Tips pour les futures sessions
 Pour Claude (ou IA) :
 Toujours commencer par lire le repo GitHub (public) au lieu de demander à l'utilisateur
