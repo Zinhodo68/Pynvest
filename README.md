@@ -298,6 +298,7 @@ on mentionne le ou les fond € qui seront utilisés dans le portefeuille.
 Quand on fait un versement sur un portfeuille de type AV ou PER, on verse directement sur le fond € si il y en a 1 ou 1 des 2 AV si il y en a 2
 
 TODO suite - Session 3 :
+Retirer la possibilité de créer un "Fonds Euro" manuellement via la transaction de type "Acheter un titre" puisque ça sera géré à la racine du portefeuille. Dans le cadre PER ou AV, 'Achat servira uniquement à arbitrer l'argent des Fonds € vers des ETF/OPCVM
 Gestion des interets des AV
 Système de revalorisation pour SCPI
 
