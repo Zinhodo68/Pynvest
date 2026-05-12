@@ -7,7 +7,11 @@ from sqlalchemy import select
 from database.db import get_session
 from database.models import Position, Transaction
 from utils.formatters import format_money, format_percent, get_perf_color
-from services.market_data import get_current_price_with_currency, get_currency_rate
+from services.market_data import (
+    get_current_price_with_currency,
+    get_currency_rate,
+    get_price_at_date_with_currency,
+)
 from pages.portefeuille_detail._cash_helpers import impact_cash, ajuster_cash
 
 
@@ -126,12 +130,27 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                                 )
 
                 # ── Formulaire ──
+                # 🆕 Détecter la source du cours pour cette position
+                if pos.get('ticker'):
+                    source = 'yahoo'
+                    symbol_or_url = pos['ticker']
+                elif pos.get('code'):
+                    source = 'boursorama'
+                    symbol_or_url = pos['code']
+                else:
+                    source = 'manual'
+                    symbol_or_url = None
+
                 # Date
                 date_today_fr = date.today().strftime('%d/%m/%Y')
                 with ui.input("Date de vente", value=date_today_fr).classes('w-full') \
                         .props('mask="##/##/####" placeholder="JJ/MM/AAAA"') as date_input:
                     with ui.menu().props('no-parent-event') as menu:
-                        with ui.date().bind_value(date_input).props('mask="DD/MM/YYYY"'):
+                        # 🆕 Référence au date picker pour écouter ses changements
+                        date_picker = ui.date().bind_value(date_input).props(
+                            'mask="DD/MM/YYYY"'
+                        )
+                        with date_picker:
                             with ui.row().classes('justify-end'):
                                 ui.button('Fermer', on_click=menu.close).props('flat')
                     with date_input.add_slot('append'):
@@ -140,11 +159,119 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                         )
 
                 # Prix de vente (pré-rempli avec le cours actuel)
+                cours_initial = pos['cours_actuel'] or pos['prix_moyen']
                 prix_input = ui.number(
                     'Prix de vente unitaire (€) *',
-                    value=pos['cours_actuel'] or pos['prix_moyen'],
+                    value=cours_initial,
                     format='%.4f', min=0
                 ).classes('w-full')
+
+                # 🆕 Indicateur de la source du prix
+                price_info_label = ui.label('').classes('text-xs italic px-2').style(
+                    f'color: {c["text_secondary"]}; min-height: 16px;'
+                )
+
+                # 🆕 Flag pour détecter les modifications manuelles
+                price_state = {
+                    'manually_modified': False,
+                    'last_auto_value': cours_initial,
+                }
+
+                # Initialiser le label
+                if source != 'manual':
+                    price_info_label.text = (
+                        f"💹 Cours actuel du marché : {cours_initial:.4f} €"
+                    )
+                else:
+                    price_info_label.text = (
+                        f"ℹ️ Position manuelle : pas d'auto-remplissage du cours"
+                    )
+
+                # 🆕 Fonction d'auto-update du prix selon la date
+                async def update_price_for_date():
+                    """Récupère le cours historique pour la date sélectionnée."""
+                    if price_state['manually_modified']:
+                        return
+
+                    if source == 'manual':
+                        return
+
+                    try:
+                        target_date = datetime.strptime(
+                            date_input.value, '%d/%m/%Y'
+                        ).date()
+                    except (ValueError, TypeError):
+                        return
+
+                    # Si c'est aujourd'hui → on utilise le cours_actuel de la position
+                    if target_date == date.today():
+                        updating['value'] = True
+                        prix_input.value = cours_initial
+                        price_state['last_auto_value'] = cours_initial
+                        updating['value'] = False
+                        price_info_label.text = (
+                            f"💹 Cours actuel du marché : {cours_initial:.4f} €"
+                        )
+                        update_montant_from_qte()
+                        return
+
+                    # Sinon : récupération historique
+                    price_info_label.text = '⏳ Récupération du cours historique...'
+
+                    try:
+                        info = await asyncio.to_thread(
+                            get_price_at_date_with_currency,
+                            symbol_or_url, source, target_date
+                        )
+
+                        if info['price'] is not None:
+                            # Conversion en EUR si nécessaire
+                            price_eur = info['price']
+                            if info.get('currency') and info['currency'] != 'EUR':
+                                rate = await asyncio.to_thread(
+                                    get_currency_rate,
+                                    info['currency'], 'EUR'
+                                )
+                                if rate:
+                                    price_eur = info['price'] * rate
+
+                            updating['value'] = True
+                            prix_input.value = round(price_eur, 4)
+                            price_state['last_auto_value'] = price_eur
+                            updating['value'] = False
+                            price_info_label.text = (
+                                f"💹 Cours du marché au "
+                                f"{target_date.strftime('%d/%m/%Y')} : "
+                                f"{price_eur:.4f} €"
+                            )
+                            update_montant_from_qte()
+                        else:
+                            price_info_label.text = (
+                                "⚠️ Cours historique non disponible "
+                                "(saisie manuelle requise)"
+                            )
+                    except Exception as e:
+                        price_info_label.text = f"⚠️ Erreur : {e}"
+
+                # 🆕 Détection de la modification manuelle
+                def on_price_change(e):
+                    """Détecte si le prix a été modifié à la main."""
+                    if updating['value']:
+                        return
+                    try:
+                        new_value = float(prix_input.value or 0)
+                        if abs(new_value - price_state['last_auto_value']) > 0.0001:
+                            price_state['manually_modified'] = True
+                            price_info_label.text = "✏️ Prix modifié manuellement"
+                    except (TypeError, ValueError):
+                        pass
+                    update_montant_from_qte()
+
+                # 🆕 Quand la date change → reset flag + recalcul
+                def on_date_change(e):
+                    """Réinitialise le flag manuel et déclenche la MAJ du prix."""
+                    price_state['manually_modified'] = False
+                    asyncio.create_task(update_price_for_date())
 
                 # Frais
                 frais_input = ui.number(
@@ -169,7 +296,7 @@ def open_sell_dialog(portefeuille_id, c, refresh):
 
                     montant_input = ui.number(
                         '💶 Montant (€)',
-                        value=pos['quantite'] * (pos['cours_actuel'] or pos['prix_moyen']),
+                        value=pos['quantite'] * cours_initial,
                         format='%.2f', min=0
                     ).classes('flex-1')
 
@@ -224,9 +351,13 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                                     lambda _: update_montant_from_qte())
                 montant_input.on('update:model-value',
                                    lambda _: update_qte_from_montant())
-                prix_input.on('update:model-value',
-                                lambda _: update_montant_from_qte())
+                # 🆕 Remplacement : on utilise on_price_change au lieu d'une lambda
+                prix_input.on('update:model-value', on_price_change)
                 frais_input.on('update:model-value', lambda _: update_summary())
+
+                # 🆕 Écouter les changements de date
+                date_picker.on('update:model-value', on_date_change)
+                date_input.on('blur', on_date_change)
 
                 # ── Récapitulatif avec +/- value ──
                 summary_label = ui.label().classes(
@@ -330,13 +461,19 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                                 position.quantite = new_qty
                                 # Le PRU reste INCHANGÉ après une vente partielle
 
-                            # Création de la transaction de vente
+                            # 🆕 Transaction enrichie avec les nouveaux champs
                             tx_vente = Transaction(
                                 portefeuille_id=portefeuille_id,
                                 date_operation=date_val,
                                 type_operation='vente',
                                 montant=montant_brut,
                                 libelle=f'Vente {q:g} × {pos["nom"][:30]}',
+                                ticker=pos.get('ticker'),
+                                code=pos.get('code'),
+                                nom_titre=pos['nom'],
+                                categorie=pos.get('categorie'),
+                                quantite=q,
+                                prix_unitaire=p_unit,
                             )
                             session.add(tx_vente)
                             session.flush()

@@ -10,6 +10,7 @@ from utils.formatters import format_money
 from services.market_data import (
     search_action_etf, search_fonds_opcvm,
     get_current_price_with_currency, get_currency_rate,
+    get_price_at_date_with_currency,
 )
 from pages.portefeuille_detail._cash_helpers import impact_cash, ajuster_cash
 
@@ -17,9 +18,8 @@ from pages.portefeuille_detail._cash_helpers import impact_cash, ajuster_cash
 def open_buy_dialog(portefeuille_id, c, refresh):
     """Dialogue d'achat avec 3 modes de sélection."""
 
-    state = {'selected': None, 'mode': 'action_etf'}  # 'action_etf', 'opcvm', 'manual'
+    state = {'selected': None, 'mode': 'action_etf'}
 
-    # Cash dispo
     with get_session() as session:
         cash_pos = session.execute(
             select(Position).where(
@@ -38,7 +38,6 @@ def open_buy_dialog(portefeuille_id, c, refresh):
             f'color: {c["text_primary"]}'
         )
 
-        # Cash dispo
         with ui.row().classes('w-full items-center gap-2 px-3 py-2 rounded-lg').style(
             f'background-color: {"#10b981" if cash_dispo > 0 else "#ef4444"}20;'
         ):
@@ -49,7 +48,6 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                 'text-sm font-semibold'
             ).style(f'color: {"#10b981" if cash_dispo > 0 else "#ef4444"}')
 
-        # ── 🎚️ Sélection du mode ──
         ui.label("Type d'actif").classes('text-sm font-medium mt-2').style(
             f'color: {c["text_secondary"]}'
         )
@@ -64,7 +62,6 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                 btn = ui.button(mode_label).props('dense').style('flex: 1;')
                 mode_buttons[mode_key] = btn
 
-        # Style des boutons selon le mode actif
         def update_mode_buttons():
             for key, btn in mode_buttons.items():
                 if key == state['mode']:
@@ -74,7 +71,6 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                     btn.props('outline dense')
                     btn.classes(remove='bg-blue-600 text-white')
 
-        # Conteneurs des modes (alternance)
         search_container = ui.column().classes('w-full gap-2')
         manual_container = ui.column().classes('w-full gap-3')
         form_container = ui.column().classes('w-full gap-3')
@@ -96,13 +92,10 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                 manual_container.clear()
                 _setup_search()
 
-        # Bind clicks
         for key, btn in mode_buttons.items():
             btn.on('click', lambda k=key: switch_mode(k))
 
-        # ─────────────────────────────────────────────
-        # MODE 1 & 2 : RECHERCHE (Yahoo ou Boursorama)
-        # ─────────────────────────────────────────────
+        # ─── MODE 1 & 2 : RECHERCHE ───
         search_input_ref = {'input': None}
         results_container = ui.column().classes('w-full gap-1').style(
             'max-height: 250px; overflow-y: auto;'
@@ -119,7 +112,6 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                     placeholder=placeholder_map.get(state['mode'], '')
                 ).classes('w-full').props('clearable autofocus')
                 search_input_ref['input'] = inp
-
                 inp.on('update:model-value', on_search_change)
 
         search_task = {'task': None}
@@ -136,7 +128,6 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                 results = await asyncio.to_thread(search_fonds_opcvm, query, 8)
             else:
                 results = []
-
             _render_results(results)
 
         def on_search_change(e):
@@ -206,7 +197,6 @@ def open_buy_dialog(portefeuille_id, c, refresh):
             asyncio.create_task(_load_and_show(ticker_data))
 
         async def _load_and_show(ticker_data):
-            # Source en fonction du mode
             source = 'boursorama' if state['mode'] == 'opcvm' else 'yahoo'
             symbol_or_url = (ticker_data.get('url') if source == 'boursorama'
                               else ticker_data.get('symbol'))
@@ -221,9 +211,7 @@ def open_buy_dialog(portefeuille_id, c, refresh):
             _render_purchase_form(ticker_data)
             form_container.set_visibility(True)
 
-        # ─────────────────────────────────────────────
-        # MODE 3 : SAISIE MANUELLE
-        # ─────────────────────────────────────────────
+        # ─── MODE 3 : MANUEL ───
         def _render_manual_form():
             manual_container.clear()
             with manual_container:
@@ -254,7 +242,6 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                         value='EUR', label='Devise'
                     ).classes('w-32')
 
-                # Bouton "Continuer" → ouvre le formulaire d'achat
                 def go_to_purchase():
                     if not nom_input.value or not nom_input.value.strip():
                         ui.notify('Le nom est obligatoire', type='negative')
@@ -277,15 +264,12 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                     ui.button('Continuer →', on_click=go_to_purchase) \
                         .props('unelevated').classes('bg-blue-600 text-white')
 
-        # ─────────────────────────────────────────────
-        # FORMULAIRE D'ACHAT (commun aux 3 modes)
-        # ─────────────────────────────────────────────
+        # ─── FORMULAIRE D'ACHAT ───
         def _render_purchase_form(t):
             form_container.clear()
             updating = {'value': False}
 
             with form_container:
-                # Card du titre sélectionné
                 with ui.card().classes('w-full p-4 rounded-lg').style(
                     f'background-color: {c["card_border"]}30; '
                     f'border: 1px solid {c["card_border"]};'
@@ -305,7 +289,6 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                 with ui.input("Date d'achat", value=date_today_fr).classes('w-full') \
                         .props('mask="##/##/####" placeholder="JJ/MM/AAAA"') as date_input:
                     with ui.menu().props('no-parent-event') as menu:
-                        # 🆕 On garde une référence au composant date
                         date_picker = ui.date().bind_value(date_input).props(
                             'mask="DD/MM/YYYY"'
                         )
@@ -317,43 +300,34 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                             'cursor-pointer'
                         )
 
-                # Prix unitaire (avec auto-remplissage selon la date)
+                # Prix
                 prix_input = ui.number(
                     f'Prix unitaire ({t.get("currency", "EUR")}) *',
                     value=t.get('current_price') or 0,
                     format='%.4f', min=0
                 ).classes('w-full')
 
-                # 🆕 Indicateur de la source du prix
                 price_info_label = ui.label('').classes('text-xs italic px-2').style(
                     f'color: {c["text_secondary"]}; min-height: 16px;'
                 )
 
-                # 🆕 Flag pour savoir si l'utilisateur a modifié le prix manuellement
                 price_state = {
                     'manually_modified': False,
                     'last_auto_value': t.get('current_price') or 0,
                 }
 
-                # Initialiser le label avec le cours actuel
                 if t.get('current_price'):
                     price_info_label.text = (
                         f"💹 Cours actuel du marché : {t['current_price']:.4f} "
                         f"{t.get('currency', 'EUR')}"
                     )
 
-                # 🆕 Fonction d'auto-update du prix selon la date
                 async def update_price_for_date():
-                    """Récupère le cours historique pour la date sélectionnée."""
-                    # Si l'utilisateur a modifié manuellement → on n'écrase pas
                     if price_state['manually_modified']:
                         return
-
-                    # Pas applicable pour le mode manuel
                     if t.get('source') == 'manual':
                         return
 
-                    # Parse la date
                     try:
                         target_date = datetime.strptime(
                             date_input.value, '%d/%m/%Y'
@@ -361,7 +335,6 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                     except (ValueError, TypeError):
                         return
 
-                    # Si c'est aujourd'hui → on garde le current_price
                     if target_date == date.today():
                         if t.get('current_price'):
                             updating['value'] = True
@@ -376,15 +349,13 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                             update_montant_from_qte()
                         return
 
-                    # Sinon, on récupère le cours historique
                     price_info_label.text = '⏳ Récupération du cours historique...'
 
                     source = t.get('source', 'yahoo')
                     symbol_or_url = (t.get('url') if source == 'boursorama'
-                                     else t.get('symbol'))
+                                      else t.get('symbol'))
 
                     try:
-                        from services.market_data import get_price_at_date_with_currency
                         info = await asyncio.to_thread(
                             get_price_at_date_with_currency,
                             symbol_or_url, source, target_date
@@ -408,40 +379,27 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                     except Exception as e:
                         price_info_label.text = f"⚠️ Erreur : {e}"
 
-                # 🆕 Détection de la modification manuelle du prix
                 def on_price_change(e):
-                    """Détecte si l'utilisateur modifie le prix manuellement."""
                     if updating['value']:
-                        return  # C'est nous qui avons changé la valeur, pas l'user
-
+                        return
                     try:
                         new_value = float(prix_input.value or 0)
-                        # On compare avec la dernière valeur auto-set
                         if abs(new_value - price_state['last_auto_value']) > 0.0001:
                             price_state['manually_modified'] = True
-                            price_info_label.text = (
-                                f"✏️ Prix modifié manuellement"
-                            )
+                            price_info_label.text = "✏️ Prix modifié manuellement"
                     except (TypeError, ValueError):
                         pass
                     update_montant_from_qte()
 
-                # 🆕 Quand la date change → recalculer le prix
                 def on_date_change(e):
-                    """Réinitialise le flag manuel et déclenche la MAJ du prix."""
                     price_state['manually_modified'] = False
                     asyncio.create_task(update_price_for_date())
-
-                # 🆕 Écoute le date picker ET l'input texte (pour tous les cas)
-                date_picker.on('update:model-value', on_date_change)
-                date_input.on('blur', on_date_change)  # Quand l'user tape et sort du champ
 
                 # Frais
                 frais_input = ui.number(
                     'Frais (€)', value=0, format='%.2f', min=0
                 ).classes('w-full')
 
-                # Quantité / Montant liés
                 ui.label("Saisissez l'un OU l'autre").classes('text-xs italic mt-2') \
                     .style(f'color: {c["text_secondary"]}')
 
@@ -496,6 +454,9 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                 prix_input.on('update:model-value', on_price_change)
                 frais_input.on('update:model-value', lambda _: update_summary())
 
+                date_picker.on('update:model-value', on_date_change)
+                date_input.on('blur', on_date_change)
+
                 summary_label = ui.label().classes(
                     'text-sm font-medium px-3 py-2 rounded-lg whitespace-pre-line'
                 ).style(
@@ -534,7 +495,6 @@ def open_buy_dialog(portefeuille_id, c, refresh):
 
                 update_summary()
 
-                # Boutons
                 with ui.row().classes('w-full justify-end gap-2 mt-4'):
                     ui.button('Annuler', on_click=dialog.close).props('flat')
 
@@ -562,7 +522,6 @@ def open_buy_dialog(portefeuille_id, c, refresh):
 
                         frais = float(frais_input.value or 0)
 
-                        # Conversion EUR
                         prix_eur = p_unit
                         cur = t.get('currency', 'EUR')
                         if cur != 'EUR':
@@ -591,7 +550,6 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                                 )
                                 return
 
-                            # Position existante (par ticker OU par nom si manuel)
                             stmt = select(Position).where(
                                 Position.portefeuille_id == portefeuille_id,
                             )
@@ -612,9 +570,7 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                                 new_pru = ((old_qty * old_pru) + (q * prix_eur)) / new_qty
                                 existing.quantite = new_qty
                                 existing.prix_moyen = new_pru
-                                # On ne touche pas au cours_actuel (vient de yfinance/boursorama)
                             else:
-                                # Nouvelle position : on récupère le vrai cours actuel
                                 cours_marche = prix_eur
                                 if t.get('source') in ('yahoo', 'boursorama') and t.get('current_price'):
                                     cours_marche = t['current_price']
@@ -638,12 +594,19 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                                 )
                                 session.add(new_pos)
 
+                            # 🆕 Transaction enrichie avec les nouveaux champs
                             tx_achat = Transaction(
                                 portefeuille_id=portefeuille_id,
                                 date_operation=date_val,
                                 type_operation='achat',
                                 montant=montant_titres_eur,
                                 libelle=f'Achat {q:g} × {t["name"][:30]}',
+                                ticker=t.get('symbol') if t.get('source') != 'manual' else None,
+                                code=t.get('isin'),
+                                nom_titre=t['name'],
+                                categorie=t.get('type', 'Autre'),
+                                quantite=q,
+                                prix_unitaire=prix_eur,
                             )
                             session.add(tx_achat)
                             session.flush()
@@ -673,7 +636,6 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                     ui.button("🛒 Confirmer l'achat", on_click=save_achat) \
                         .props('unelevated').classes('bg-emerald-600 text-white')
 
-        # ── Initialisation : on démarre en mode action_etf ──
         switch_mode('action_etf')
 
     dialog.open()

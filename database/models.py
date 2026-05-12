@@ -56,7 +56,6 @@ class Portefeuille(Base):
     taux_interet = Column(Float, nullable=True)  # ex: 3.0 pour 3%
     plafond = Column(Float, nullable=True)  # ex: 22950 pour Livret A
 
-    # Relations futures (transactions, valorisations)
     valorisations = relationship('Valorisation', back_populates='portefeuille',
                                   cascade='all, delete-orphan',
                                   order_by='Valorisation.date_valeur')
@@ -72,19 +71,14 @@ class Portefeuille(Base):
 
     @property
     def valorisation_actuelle(self):
-        """Valeur actuelle = somme des positions OU dernière valorisation manuelle.
-        Priorité aux positions si elles existent, sinon snapshot manuel."""
-        # Si on a des positions, on calcule depuis elles
         if self.positions:
             return sum(pos.valorisation for pos in self.positions)
-        # Sinon on retombe sur le dernier snapshot manuel
         if self.valorisations:
             return self.valorisations[-1].montant
         return 0.0
 
     @property
     def total_verse(self):
-        """Somme des versements - retraits."""
         total = 0.0
         for t in self.transactions:
             if t.type_operation == 'versement':
@@ -95,19 +89,16 @@ class Portefeuille(Base):
 
     @property
     def plus_value(self):
-        """Plus-value latente = valorisation - total versé."""
         return self.valorisation_actuelle - self.total_verse
 
     @property
     def rendement_total_pct(self):
-        """Rendement total en %."""
         if self.total_verse > 0:
             return (self.plus_value / self.total_verse) * 100
         return 0.0
 
     @property
     def rendement_annualise_pct(self):
-        """Rendement annualisé (TRI simplifié)."""
         if not self.date_creation or self.total_verse <= 0:
             return 0.0
         from datetime import date as _date
@@ -169,14 +160,19 @@ class Transaction(Base):
     montant = Column(Float, nullable=False)
     libelle = Column(String(200), nullable=True)
 
-    # ✨ NOUVEAU : lien vers la transaction parente (pour les frais liés à un achat)
     parent_transaction_id = Column(Integer, ForeignKey('transactions.id'), nullable=True)
+
+    # 🆕 NOUVEAUX CHAMPS pour traçabilité historique des achats/ventes
+    ticker = Column(String(50), nullable=True)        # Ticker Yahoo (ex: 'MC.PA')
+    code = Column(String(50), nullable=True)          # ISIN (pour OPCVM)
+    nom_titre = Column(String(200), nullable=True)    # Nom du titre (snapshot)
+    categorie = Column(String(50), nullable=True)     # Catégorie (snapshot)
+    quantite = Column(Float, nullable=True)           # Quantité achetée/vendue
+    prix_unitaire = Column(Float, nullable=True)      # Prix unitaire au moment de l'opération
 
     created_at = Column(DateTime, server_default=func.now())
 
     portefeuille = relationship('Portefeuille', back_populates='transactions')
-
-    # Relation auto-référentielle pour les transactions liées
     parent = relationship('Transaction', remote_side=[id], backref='children')
 
 
@@ -188,8 +184,8 @@ class Position(Base):
     portefeuille_id = Column(Integer, ForeignKey('portefeuilles.id'), nullable=False)
 
     nom = Column(String(200), nullable=False)
-    code = Column(String(50), nullable=True)            # ISIN
-    ticker = Column(String(50), nullable=True)           # ticker Yahoo (AAPL, CW8.PA...)
+    code = Column(String(50), nullable=True)
+    ticker = Column(String(50), nullable=True)
     categorie = Column(String(50), nullable=True)
 
     quantite = Column(Float, nullable=False, default=0)
@@ -200,7 +196,6 @@ class Position(Base):
     notes = Column(Text, nullable=True)
     date_ouverture = Column(Date, nullable=True)
 
-    # Métadonnées de marché
     auto_update = Column(Boolean, default=True)
     last_update = Column(DateTime, nullable=True)
 
@@ -209,15 +204,12 @@ class Position(Base):
 
     portefeuille = relationship('Portefeuille', back_populates='positions')
 
-    # ─── Propriétés calculées ───
     @property
     def prix_revient(self):
-        """Coût total d'acquisition."""
         return (self.quantite or 0) * (self.prix_moyen or 0)
 
     @property
     def valorisation(self):
-        """Valeur actuelle de la position."""
         if self.cours_actuel is not None:
             return (self.quantite or 0) * self.cours_actuel
         return self.prix_revient
@@ -259,7 +251,6 @@ class CoursHistorique(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
 
-    # Identifiant du titre (ticker Yahoo OU code ISIN)
     ticker = Column(String(50), nullable=True, index=True)
     isin = Column(String(50), nullable=True, index=True)
 
@@ -267,7 +258,7 @@ class CoursHistorique(Base):
     cours = Column(Float, nullable=False)
     devise = Column(String(10), default='EUR')
 
-    source = Column(String(20), nullable=True)  # 'yahoo', 'boursorama', 'manual'
+    source = Column(String(20), nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
     def to_dict(self):
