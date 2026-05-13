@@ -58,3 +58,12 @@ def get_price_at_date_with_currency(symbol_or_url: str, source: str, target_date
         return get_current_price_with_currency(symbol_or_url, source)
     else:
         return {'price': None, 'currency': 'EUR'}
+
+# Recherche unifiée (BDD + Yahoo + Boursorama)
+from services.search import unified_search
+
+__all__ = [
+    'search_action_etf', 'search_fonds_opcvm',
+    'get_current_price_with_currency', 'get_currency_rate',
+    'unified_search',
+]

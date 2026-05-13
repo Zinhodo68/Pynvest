@@ -52,6 +52,37 @@ Tous les champs liés aux titres sont nullable. Ils sont remplis si `type_operat
 - Une transaction est "interne" si elle est **parent d'arbitrage** (a un enfant) **OU enfant d'arbitrage**
 - Pour les transactions internes : **NE PAS toucher au cash**, seules les positions évoluent
 
+## 🔍 Recherche unifiée (Session 5)
+
+**Concept** : un **seul champ de recherche** dans le dialogue d'achat qui interroge **3 sources en parallèle** + propose la création manuelle.
+
+### Architecture (`services/search.py`)
+
+**`unified_search(query, limit_per_source=6)`** — orchestrateur asynchrone qui :
+1. **Détecte les ISIN** (regex `^[A-Z]{2}[A-Z0-9]{9}\d$`) → priorise Boursorama
+2. Lance en parallèle (`asyncio.gather`) :
+   - `search_in_db(query)` — titres déjà manipulés via `Transaction.distinct()`
+   - `search_yahoo(query)` — actions, ETF, crypto, indices
+   - `search_opcvm(query)` — OPCVM/SICAV via Boursorama
+3. Retourne un dict groupé : `{'db': [...], 'yahoo': [...], 'boursorama': [...], 'is_isin': bool}`
+
+**`search_in_db(query)`** — recherche dans les transactions passées :
+- Source : `SELECT DISTINCT ticker, code, nom_titre, categorie FROM transactions WHERE nom_titre IS NOT NULL`
+- Filtrage Python case-insensitive sur ticker/code/nom
+- **Exclut** les Cash et Fonds € (catégories `'Cash'`, `'Fonds €'`, `'Fonds Euro'`)
+- Enrichit chaque résultat avec la liste des portefeuilles où le titre est encore détenu (via `Position`)
+
+### UX (`_buy_dialog.py`)
+
+- **Champ unique** avec debounce 400ms
+- **Indicateur "🔖 ISIN détecté"** qui apparaît dynamiquement
+- **4 groupes de résultats** affichés sous le champ :
+  1. **📁 DÉJÀ DANS VOS PORTEFEUILLES** (vert) — avec mention `Portefeuille (quantité)`
+  2. **🌐 YAHOO FINANCE**
+  3. **📊 BOURSORAMA**
+  4. **➕ CRÉER UN NOUVEAU SUPPORT** (toujours présent, prérempli avec la query)
+- Au clic → pré-remplissage automatique du formulaire d'achat (toute la logique downstream conservée : PRU auto, arbitrage Fonds €, etc.)
+
 ## ⚙️ Fonctionnement des composants clés
 
 ### 🔄 Mise à jour des cours (`services/quotes_updater.py`)
@@ -87,7 +118,12 @@ Tous les champs liés aux titres sont nullable. Ils sont remplis si `type_operat
 
 ### 🛒 Dialog d'achat (`pages/portefeuille_detail/_buy_dialog.py`)
 
-- 3 modes : ACTION/ETF/CRYPTO, OPCVM/SICAV, MANUEL
+🆕 **Refonte UX (Session 5)** : un seul champ de recherche unifié remplace les 3 anciens modes (Action/ETF, OPCVM, Manuel).
+
+- Recherche temps réel avec debounce 400ms
+- 4 sources affichées en groupes : BDD locale, Yahoo, Boursorama, Création manuelle
+- Détection automatique des ISIN (priorité Boursorama)
+- Pré-remplissage automatique du formulaire d'achat au clic sur un résultat
 - PRU auto-rempli selon la date d'achat (Yahoo)
 - Logique AV/PER : l'achat utilise un Fonds € source existant (arbitrage)
 - Impossible de créer un Fonds € via ce dialogue
@@ -95,7 +131,7 @@ Tous les champs liés aux titres sont nullable. Ils sont remplis si `type_operat
 
 ### 💹 Dialog de vente (`pages/portefeuille_detail/_sell_dialog.py`)
 
-- 🆕 **Liste filtrée** : exclut Cash, Fonds €, Fonds Euro (réserves de liquidités)
+- **Liste filtrée** : exclut Cash, Fonds €, Fonds Euro (réserves de liquidités)
 - Sur AV/PER : sélection obligatoire d'un Fonds € de destination
 - PRU auto-rempli selon la date de vente (Yahoo)
 - Détection automatique de la source (yahoo si ticker, boursorama si code, manual sinon)
@@ -104,9 +140,9 @@ Tous les champs liés aux titres sont nullable. Ils sont remplis si `type_operat
 
 Gère les types : Versement, Retrait, Intérêts Fonds €, Dividende (D ou C), Frais (€ ou parts).
 
-**🆕 Édition** : actuellement bloquée pour les achats/ventes (message clair invitant à supprimer/recréer).
+**Édition** : actuellement bloquée pour les achats/ventes (message clair invitant à supprimer/recréer).
 
-**🆕 Suppression intelligente** :
+**Suppression intelligente** :
 - **Achat AV/PER** → restaure la quantité du Fonds € source, supprime la position du titre acheté, supprime les enfants
 - **Vente AV/PER** → reprélève le Fonds € destination, restaure la position du titre vendu (création si vente totale)
 - **Achat/Vente PEA/CTO** → ajuste le cash normalement
@@ -116,7 +152,14 @@ Gère les types : Versement, Retrait, Intérêts Fonds €, Dividende (D ou C), 
 
 ### 📋 Liste des positions (`pages/portefeuille_detail/_positions.py`)
 
-🆕 **Affichage trié** : titres en premier, **réserves de liquidités** (Cash, Fonds €) à la fin avec un séparateur visuel "💰 RÉSERVES DE LIQUIDITÉS".
+**Affichage trié** : titres en premier, **réserves de liquidités** (Cash, Fonds €) à la fin avec un séparateur visuel "💰 RÉSERVES DE LIQUIDITÉS".
+
+### 🧹 Reset des données (`reset_data.py`)
+
+🆕 **Préservation des Fonds €** :
+- Supprime toutes les transactions, valorisations, positions classiques
+- 🛡️ **Conserve** les positions de catégorie `'Fonds €'` / `'Fonds Euro'` créées à la création des portefeuilles AV/PER
+- Réinitialise leur quantité à 0 et leur PRU à 1.0
 
 ## ✅ Fonctionnalités déjà développées
 
@@ -153,6 +196,8 @@ Gère les types : Versement, Retrait, Intérêts Fonds €, Dividende (D ou C), 
 - [x] **Liste de vente** : exclusion automatique des réserves (Cash, Fonds €)
 - [x] **Tableau des positions** : titres puis réserves de liquidités (avec séparateur)
 - [x] **Suppression de transaction intelligente** : restauration des positions sources, gestion des arbitrages enfants, jamais de Cash fantôme sur AV/PER
+- [x] **Reset des données préservant les Fonds €** créés à la création du portefeuille
+- [x] 🆕 **Recherche unifiée à l'achat** : un seul champ qui interroge BDD + Yahoo + Boursorama avec affichage groupé et détection ISIN
 
 ### 🟡 En cours / partiel
 
@@ -168,6 +213,7 @@ Gère les types : Versement, Retrait, Intérêts Fonds €, Dividende (D ou C), 
 - ❌ Pas de sauvegarde automatique de la BDD.
 - ❌ Pas d'export PDF/Excel.
 - ⚠️ **Incohérence catégories Fonds €** : certaines positions en BDD ont `'Fonds €'`, d'autres `'Fonds Euro'`. Le code accepte les deux orthographes via `Position.categorie.in_(['Fonds €', 'Fonds Euro'])`. À harmoniser un jour via un script de migration.
+- ⚠️ **Doublon de fonction** dans `services/_yahoo.py` : `get_yahoo_price_at_date` est définie 2 fois (la 2ème écrase la 1ère). À nettoyer.
 
 ## 🎯 Roadmap Sessions
 
@@ -211,8 +257,26 @@ Gère les types : Versement, Retrait, Intérêts Fonds €, Dividende (D ou C), 
 - Filtrage des réserves (Cash, Fonds €, Fonds Euro) dans la liste des positions vendables
 - Tri visuel dans `_positions.py` : titres puis réserves avec séparateur
 - Blocage propre de l'édition achat/vente avec message invitant à supprimer/recréer
+- Préservation des Fonds € lors d'un reset_data
 
-### 🔜 Session 5 — Polish UI
+### ✅ Session 5 — Recherche unifiée à l'achat (terminée)
+
+**Objectif** : remplacer les 3 onglets (Yahoo / Boursorama / Manuel) par un **champ de recherche unique** interrogeant toutes les sources en parallèle + la BDD locale.
+
+**Ajouts** :
+- 🆕 Module **`services/search.py`** : 
+  - `is_isin(query)` — détection regex des codes ISIN
+  - `search_in_db(query)` — recherche dans les transactions historiques (`Transaction.distinct()`)
+  - `unified_search(query)` — orchestrateur asynchrone (BDD + Yahoo + Boursorama en parallèle via `asyncio.gather`)
+- 🔄 Refonte complète de **`_buy_dialog.py`** :
+  - Suppression des 3 boutons de mode
+  - Champ unique avec debounce 400ms
+  - 4 groupes de résultats affichés (BDD / Yahoo / Boursorama / Créer manuel)
+  - Détection ISIN avec indicateur visuel
+  - Mention du ou des portefeuilles où le titre est déjà détenu
+  - Conservation intégrale de la logique downstream (formulaire d'achat, PRU auto, arbitrage Fonds €, etc.)
+
+### 🔜 Session 6 — Polish UI
 
 - Zoom dynamique du graphique
 - Indicateur de loading pendant backfill
@@ -224,6 +288,7 @@ Gère les types : Versement, Retrait, Intérêts Fonds €, Dividende (D ou C), 
 - Édition véritable des achats/ventes (extension de `_buy_dialog` et `_sell_dialog`)
 - Édition des transactions de flux
 - Harmonisation des catégories `'Fonds €'` / `'Fonds Euro'` (script de migration)
+- Nettoyage du doublon `get_yahoo_price_at_date` dans `_yahoo.py`
 - Export PDF/Excel
 - SCPI (système de revalorisation et distributions)
 - Splits/fractionnements
@@ -263,3 +328,11 @@ Gère les types : Versement, Retrait, Intérêts Fonds €, Dividende (D ou C), 
 ❌ **Supprimer une transaction parente d'arbitrage sans gérer les enfants**
 - Les enfants restent en BDD avec leur impact non annulé → BDD incohérente
 - ✅ Boucler sur `t.children` et annuler chaque impact (Fonds €, position, cash) avant suppression
+
+❌ **Lancer plusieurs recherches sans debounce ni annulation**
+- Spam des API Yahoo/Boursorama, résultats obsolètes qui écrasent les nouveaux
+- ✅ Pattern : annuler la `task` précédente avant d'en créer une nouvelle, + `await asyncio.sleep(0.4)` au début
+
+❌ **Chercher les titres "déjà connus" depuis les `Position`**
+- Si un titre a été entièrement vendu, la `Position` n'existe plus → on le perd
+- ✅ Source = `Transaction.distinct()` qui garde la trace même des titres revendus

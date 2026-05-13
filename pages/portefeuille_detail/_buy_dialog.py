@@ -1,4 +1,4 @@
-"""Dialogue d'achat avec 3 modes : Action/ETF, OPCVM, Manuel."""
+"""Dialogue d'achat avec recherche unifiée (BDD + Yahoo + Boursorama + Manuel)."""
 import asyncio
 from datetime import date, datetime
 from nicegui import ui
@@ -8,20 +8,19 @@ from database.db import get_session
 from database.models import Position, Transaction, Portefeuille
 from utils.formatters import format_money
 from services.market_data import (
-    search_action_etf, search_fonds_opcvm,
     get_current_price_with_currency, get_currency_rate,
     get_price_at_date_with_currency,
 )
+from services.search import unified_search, is_isin
 from pages.portefeuille_detail._cash_helpers import impact_cash, ajuster_cash
 
 
 def open_buy_dialog(portefeuille_id, c, refresh):
-    """Dialogue d'achat avec 3 modes de sélection (Gère Arbitrage Fonds € pour AV/PER)."""
+    """Dialogue d'achat avec un seul champ de recherche unifié."""
 
-    state = {'selected': None, 'mode': 'action_etf'}
+    state = {'selected': None}
 
     with get_session() as session:
-        # Détection du type de portefeuille pour gérer le Cash / Fonds €
         ptf = session.get(Portefeuille, portefeuille_id)
         is_av_per = ptf.type in ['Assurance-Vie', 'AV', 'PER', 'Assurance Vie']
 
@@ -29,10 +28,11 @@ def open_buy_dialog(portefeuille_id, c, refresh):
             fonds_euros_db = session.execute(
                 select(Position).where(
                     Position.portefeuille_id == portefeuille_id,
-                    Position.categorie == 'Fonds Euro'
+                    Position.categorie.in_(['Fonds €', 'Fonds Euro'])
                 )
             ).scalars().all()
-            fonds_euros = {fe.id: {'nom': fe.nom, 'quantite': fe.quantite} for fe in fonds_euros_db}
+            fonds_euros = {fe.id: {'nom': fe.nom, 'quantite': fe.quantite}
+                           for fe in fonds_euros_db}
             cash_dispo = sum(fe['quantite'] for fe in fonds_euros.values())
             label_dispo = 'Fonds € disponibles'
         else:
@@ -49,12 +49,13 @@ def open_buy_dialog(portefeuille_id, c, refresh):
     with ui.dialog() as dialog, ui.card().classes('p-6 gap-3').style(
             f'background-color: {c["card_bg"]}; '
             f'border: 1px solid {c["card_border"]}; '
-            f'min-width: 650px; max-width: 750px;'
+            f'min-width: 700px; max-width: 800px;'
     ):
         ui.label('🛒 Acheter un titre').classes('text-xl font-bold').style(
             f'color: {c["text_primary"]}'
         )
 
+        # Indicateur du solde disponible
         with ui.row().classes('w-full items-center gap-2 px-3 py-2 rounded-lg').style(
                 f'background-color: {"#10b981" if cash_dispo > 0 else "#ef4444"}20;'
         ):
@@ -65,179 +66,313 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                 'text-sm font-semibold'
             ).style(f'color: {"#10b981" if cash_dispo > 0 else "#ef4444"}')
 
-        ui.label("Type d'actif").classes('text-sm font-medium mt-2').style(
+        # ── Champ de recherche unifié ──
+        ui.label("🔍 Rechercher un titre").classes('text-sm font-medium mt-2').style(
             f'color: {c["text_secondary"]}'
         )
 
-        mode_buttons = {}
-        with ui.row().classes('w-full gap-2'):
-            for mode_key, mode_label in [
-                ('action_etf', '📈 Action / ETF / Crypto'),
-                ('opcvm', '💼 OPCVM / SICAV'),
-                ('manual', '✍️ Manuel (SCPI, etc)'),  # (MODIFIÉ) Retiré "Fonds €" de la description
-            ]:
-                btn = ui.button(mode_label).props('dense').style('flex: 1;')
-                mode_buttons[mode_key] = btn
+        search_input = ui.input(
+            placeholder='Nom du titre, ticker (ex: AAPL, MC.PA) ou ISIN (ex: FR0010923375)...'
+        ).classes('w-full').props('clearable autofocus')
 
-        def update_mode_buttons():
-            for key, btn in mode_buttons.items():
-                if key == state['mode']:
-                    btn.props('unelevated dense')
-                    btn.classes('bg-blue-600 text-white', remove='text-slate-700')
-                else:
-                    btn.props('outline dense')
-                    btn.classes(remove='bg-blue-600 text-white')
-
-        search_container = ui.column().classes('w-full gap-2')
-        manual_container = ui.column().classes('w-full gap-3')
-        form_container = ui.column().classes('w-full gap-3')
-        form_container.set_visibility(False)
-
-        def switch_mode(new_mode):
-            state['mode'] = new_mode
-            state['selected'] = None
-            form_container.set_visibility(False)
-            update_mode_buttons()
-
-            if new_mode == 'manual':
-                search_container.set_visibility(False)
-                manual_container.set_visibility(True)
-                _render_manual_form()
-            else:
-                search_container.set_visibility(True)
-                manual_container.set_visibility(False)
-                manual_container.clear()
-                _setup_search()
-
-        for key, btn in mode_buttons.items():
-            btn.on('click', lambda k=key: switch_mode(k))
-
-        # ... (Le code de recherche reste identique) ...
-        search_input_ref = {'input': None}
-        results_container = ui.column().classes('w-full gap-1').style(
-            'max-height: 250px; overflow-y: auto;'
+        # Indicateur ISIN détecté
+        isin_label = ui.label('').classes('text-xs italic px-2').style(
+            f'color: {c["text_secondary"]}; min-height: 16px;'
         )
 
-        def _setup_search():
-            search_container.clear()
-            with search_container:
-                placeholder_map = {
-                    'action_etf': 'ex: Apple, AAPL, MSCI World, BTC...',
-                    'opcvm': 'ex: Independance Expansion, LU1832174962...',
-                }
-                inp = ui.input(
-                    placeholder=placeholder_map.get(state['mode'], '')
-                ).classes('w-full').props('clearable autofocus')
-                search_input_ref['input'] = inp
-                inp.on('update:model-value', on_search_change)
+        # Conteneur des résultats groupés
+        results_container = ui.column().classes('w-full gap-1').style(
+            'max-height: 350px; overflow-y: auto;'
+        )
+
+        # Conteneur du formulaire d'achat (caché initialement)
+        form_container = ui.column().classes('w-full gap-3')
+        form_container.set_visibility(False)
 
         search_task = {'task': None}
 
         async def do_search(query: str):
-            await asyncio.sleep(0.4)
+            """Recherche déclenchée après debounce."""
+            await asyncio.sleep(0.4)  # Debounce
             if not query or len(query) < 2:
                 results_container.clear()
+                isin_label.text = ''
                 return
 
-            if state['mode'] == 'action_etf':
-                results = await asyncio.to_thread(search_action_etf, query, 8)
-            elif state['mode'] == 'opcvm':
-                results = await asyncio.to_thread(search_fonds_opcvm, query, 8)
+            # Affichage indicateur ISIN
+            if is_isin(query):
+                isin_label.text = f'🔖 ISIN détecté : recherche prioritaire chez Boursorama'
             else:
-                results = []
-            _render_results(results)
+                isin_label.text = ''
+
+            # Loader
+            results_container.clear()
+            with results_container:
+                ui.label('⏳ Recherche en cours...').classes('text-sm py-2').style(
+                    f'color: {c["text_secondary"]}'
+                )
+
+            try:
+                results = await unified_search(query, limit_per_source=6)
+            except Exception as e:
+                results_container.clear()
+                with results_container:
+                    ui.label(f'❌ Erreur : {e}').classes('text-sm py-2').style(
+                        'color: #ef4444'
+                    )
+                return
+
+            _render_results(results, query)
 
         def on_search_change(e):
+            """Annule la recherche en cours et en lance une nouvelle."""
             if search_task['task'] and not search_task['task'].done():
                 search_task['task'].cancel()
             query = e.args if isinstance(e.args, str) else (e.value or '')
             search_task['task'] = asyncio.create_task(do_search(query))
 
-        def _render_results(results):
+        search_input.on('update:model-value', on_search_change)
+
+        def _render_results(results: dict, query: str):
+            """Affiche les 4 groupes de résultats : BDD / Yahoo / Boursorama / Créer."""
             results_container.clear()
-            if not results:
-                with results_container:
-                    ui.label('Aucun résultat').classes('text-sm py-2').style(
-                        f'color: {c["text_secondary"]}'
-                    )
-                return
+
+            db_results = results.get('db', [])
+            yahoo_results = results.get('yahoo', [])
+            boursorama_results = results.get('boursorama', [])
 
             with results_container:
-                for r in results:
-                    _render_result_row(r)
+                # ─── Groupe 1 : DÉJÀ DANS VOS PORTEFEUILLES ───
+                if db_results:
+                    _render_group_header('📁 DÉJÀ DANS VOS PORTEFEUILLES',
+                                         len(db_results))
+                    for r in db_results:
+                        _render_db_result(r)
 
-        def _render_result_row(r):
-            type_colors = {
-                'Action': '#3b82f6', 'ETF': '#10b981',
-                'Fonds': '#8b5cf6', 'Crypto': '#f97316',
-                'Indice': '#64748b',
-            }
-            type_color = type_colors.get(r.get('type', ''), '#64748b')
+                # ─── Groupe 2 : YAHOO FINANCE ───
+                if yahoo_results:
+                    _render_group_header('🌐 YAHOO FINANCE',
+                                         len(yahoo_results))
+                    for r in yahoo_results:
+                        _render_external_result(r, source='yahoo')
+
+                # ─── Groupe 3 : BOURSORAMA ───
+                if boursorama_results:
+                    _render_group_header('📊 BOURSORAMA',
+                                         len(boursorama_results))
+                    for r in boursorama_results:
+                        _render_external_result(r, source='boursorama')
+
+                # ─── Groupe 4 : CRÉER UN SUPPORT MANUEL (toujours présent) ───
+                _render_group_header('➕ CRÉER UN NOUVEAU SUPPORT', 0)
+                _render_manual_create_row(query)
+
+        def _render_group_header(label: str, count: int):
+            """Header de groupe avec compteur."""
+            with ui.row().classes('w-full items-center gap-2 px-2 py-1 mt-2').style(
+                    f'border-bottom: 1px solid {c["card_border"]};'
+            ):
+                ui.label(label).classes('text-xs font-bold tracking-wider').style(
+                    f'color: {c["text_secondary"]};'
+                )
+                if count > 0:
+                    ui.label(f'({count})').classes('text-xs').style(
+                        f'color: {c["text_secondary"]}; opacity: 0.7;'
+                    )
+
+        def _render_db_result(r: dict):
+            """Ligne de résultat 'déjà détenu' avec info portefeuille."""
+            type_color = _get_type_color(r.get('type', ''))
 
             with ui.row().classes(
                     'w-full items-center gap-3 p-2 rounded-lg cursor-pointer'
-            ).style(f'background-color: {c["card_border"]}30;') \
-                    .on('click', lambda res=r: select_ticker(res)):
+            ).style(
+                f'background-color: #10b98115; '
+                f'border: 1px solid #10b98140;'
+            ).on('click', lambda res=r: select_existing(res)):
+
                 ui.label(r.get('type', '?')).classes(
                     'text-xs font-bold px-2 py-1 rounded'
                 ).style(
                     f'background-color: {type_color}30; color: {type_color}; '
                     f'min-width: 60px; text-align: center;'
                 )
+
                 with ui.column().classes('gap-0').style('flex: 1; min-width: 0;'):
-                    ui.label(r.get('name', '')).classes('text-sm font-medium').style(
+                    with ui.row().classes('items-center gap-2'):
+                        ui.label(r.get('name', '')).classes(
+                            'text-sm font-medium'
+                        ).style(
+                            f'color: {c["text_primary"]}; '
+                            f'overflow: hidden; text-overflow: ellipsis; '
+                            f'white-space: nowrap;'
+                        )
+                        ui.icon('check_circle').classes('text-sm').style(
+                            'color: #10b981;'
+                        ).tooltip('Déjà connu dans votre BDD')
+
+                    sub_parts = []
+                    if r.get('ticker'):
+                        sub_parts.append(r['ticker'])
+                    if r.get('isin'):
+                        sub_parts.append(r['isin'])
+                    sub_text = ' • '.join(sub_parts) if sub_parts else r.get('name', '')
+
+                    # Info portefeuille où détenu
+                    in_portfolios = r.get('in_portfolios', [])
+                    if in_portfolios:
+                        ptf_info = ', '.join([
+                            f"{p['portefeuille']} ({p['quantite']:g})"
+                            for p in in_portfolios[:2]
+                        ])
+                        if len(in_portfolios) > 2:
+                            ptf_info += f' +{len(in_portfolios) - 2}'
+                        sub_text += f' • 📁 {ptf_info}'
+
+                    ui.label(sub_text).classes('text-xs').style(
+                        f'color: {c["text_secondary"]}'
+                    )
+
+        def _render_external_result(r: dict, source: str):
+            """Ligne de résultat Yahoo ou Boursorama."""
+            type_color = _get_type_color(r.get('type', ''))
+
+            with ui.row().classes(
+                    'w-full items-center gap-3 p-2 rounded-lg cursor-pointer'
+            ).style(f'background-color: {c["card_border"]}30;') \
+                    .on('click', lambda res=r, s=source: select_external(res, s)):
+
+                ui.label(r.get('type', '?')).classes(
+                    'text-xs font-bold px-2 py-1 rounded'
+                ).style(
+                    f'background-color: {type_color}30; color: {type_color}; '
+                    f'min-width: 60px; text-align: center;'
+                )
+
+                with ui.column().classes('gap-0').style('flex: 1; min-width: 0;'):
+                    ui.label(r.get('name', '')).classes(
+                        'text-sm font-medium'
+                    ).style(
                         f'color: {c["text_primary"]}; '
                         f'overflow: hidden; text-overflow: ellipsis; '
                         f'white-space: nowrap;'
                     )
-                    sub = r.get('symbol', '')
-                    if r.get('isin') and r.get('isin') != sub:
-                        sub = f'{r["isin"]} • {r.get("exchange", "")}'
-                    elif r.get('exchange'):
-                        sub = f'{sub} • {r["exchange"]}'
-                    ui.label(sub).classes('text-xs').style(
+                    sub_parts = []
+                    if r.get('symbol'):
+                        sub_parts.append(r['symbol'])
+                    if r.get('isin') and r.get('isin') != r.get('symbol'):
+                        sub_parts.append(r['isin'])
+                    if r.get('exchange'):
+                        sub_parts.append(r['exchange'])
+                    ui.label(' • '.join(sub_parts)).classes('text-xs').style(
                         f'color: {c["text_secondary"]}'
                     )
-                ui.label(r.get('currency', '')).classes('text-xs font-semibold') \
-                    .style(
-                    f'color: {c["text_secondary"]}; min-width: 40px; text-align: right;'
+
+                ui.label(r.get('currency', '')).classes(
+                    'text-xs font-semibold'
+                ).style(
+                    f'color: {c["text_secondary"]}; '
+                    f'min-width: 40px; text-align: right;'
                 )
 
-        def select_ticker(ticker_data):
+        def _render_manual_create_row(query: str):
+            """Bouton/ligne pour créer un support manuel."""
+            label = (f'Créer "{query}" comme support manuel'
+                     if query else 'Créer un nouveau support manuel')
+
+            with ui.row().classes(
+                    'w-full items-center gap-3 p-2 rounded-lg cursor-pointer'
+            ).style(
+                f'background-color: #8b5cf615; '
+                f'border: 1px dashed #8b5cf640;'
+            ).on('click', lambda q=query: open_manual_form(q)):
+
+                ui.icon('add_circle').classes('text-xl').style(
+                    'color: #8b5cf6;'
+                )
+                with ui.column().classes('gap-0').style('flex: 1;'):
+                    ui.label(label).classes('text-sm font-medium').style(
+                        f'color: {c["text_primary"]}'
+                    )
+                    ui.label('SCPI, fonds privé, projet, support spécifique...') \
+                        .classes('text-xs').style(f'color: {c["text_secondary"]}')
+
+        def _get_type_color(type_str: str) -> str:
+            colors = {
+                'Action': '#3b82f6', 'ETF': '#10b981',
+                'Fonds': '#8b5cf6', 'Crypto': '#f97316',
+                'Indice': '#64748b', 'SCPI': '#f59e0b',
+                'UC': '#a855f7', 'Obligation': '#06b6d4',
+                'Projet': '#ec4899',
+            }
+            return colors.get(type_str, '#64748b')
+
+        # ─── Sélection d'un titre déjà détenu (BDD) ───
+        def select_existing(ticker_data: dict):
             state['selected'] = ticker_data
             results_container.clear()
-            if search_input_ref['input']:
-                search_input_ref['input'].value = (
-                    f'{ticker_data.get("name", "")} ({ticker_data.get("symbol", "")})'
-                )
-            ui.notify(f'Récupération du cours...', type='info')
-            asyncio.create_task(_load_and_show(ticker_data))
+            search_input.value = ticker_data.get('name', '')
 
-        async def _load_and_show(ticker_data):
-            source = 'boursorama' if state['mode'] == 'opcvm' else 'yahoo'
+            # Source : on essaie de deviner depuis ticker/isin
+            if ticker_data.get('ticker'):
+                source = 'yahoo'
+                symbol_or_url = ticker_data['ticker']
+            elif ticker_data.get('isin'):
+                source = 'boursorama'
+                symbol_or_url = ticker_data['isin']
+            else:
+                source = 'manual'
+                symbol_or_url = None
+
+            ticker_data['source'] = source
+            ticker_data['symbol'] = ticker_data.get('ticker') or ticker_data.get('isin') or ticker_data.get('name', '')[:20]
+
+            if source == 'manual':
+                # Pas de cours auto → directement le formulaire
+                ticker_data['current_price'] = None
+                _render_purchase_form(ticker_data)
+                form_container.set_visibility(True)
+            else:
+                ui.notify('Récupération du cours...', type='info')
+                asyncio.create_task(_load_and_show(ticker_data, symbol_or_url, source))
+
+        # ─── Sélection d'un titre Yahoo/Boursorama ───
+        def select_external(ticker_data: dict, source: str):
+            state['selected'] = ticker_data
+            results_container.clear()
+            search_input.value = (
+                f'{ticker_data.get("name", "")} ({ticker_data.get("symbol", "")})'
+            )
+            ticker_data['source'] = source
             symbol_or_url = (ticker_data.get('url') if source == 'boursorama'
                              else ticker_data.get('symbol'))
+            ui.notify('Récupération du cours...', type='info')
+            asyncio.create_task(_load_and_show(ticker_data, symbol_or_url, source))
 
+        async def _load_and_show(ticker_data, symbol_or_url, source):
             info = await asyncio.to_thread(
                 get_current_price_with_currency, symbol_or_url, source
             )
-            ticker_data['current_price'] = info['price']
-            if info['currency']:
+            ticker_data['current_price'] = info.get('price')
+            if info.get('currency'):
                 ticker_data['currency'] = info['currency']
-            ticker_data['source'] = source
             _render_purchase_form(ticker_data)
             form_container.set_visibility(True)
 
-        # ─── MODE 3 : MANUEL ───
-        def _render_manual_form():
-            manual_container.clear()
-            with manual_container:
-                with ui.row().classes('w-full gap-3'):
-                    nom_input = ui.input('Nom du titre *') \
-                        .classes('flex-1') \
-                        .props('placeholder="ex: SCPI Primovie"')
+        # ─── Création manuelle ───
+        def open_manual_form(prefill_name: str = ''):
+            """Affiche le mini-formulaire de création manuelle dans results_container."""
+            results_container.clear()
+            with results_container:
+                ui.label('✍️ Création d\'un support manuel').classes(
+                    'text-sm font-bold mt-2'
+                ).style(f'color: {c["text_primary"]}')
 
-                    # (MODIFIÉ) Retrait de "Fonds Euro" de la liste des catégories
+                with ui.row().classes('w-full gap-3'):
+                    nom_input = ui.input(
+                        'Nom du titre *', value=prefill_name
+                    ).classes('flex-1').props('placeholder="ex: SCPI Primovie"')
+
                     cat_input = ui.select(
                         {
                             'SCPI': 'SCPI',
@@ -253,9 +388,9 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                     ).classes('flex-1')
 
                 with ui.row().classes('w-full gap-3'):
-                    code_input = ui.input('Code / ISIN (optionnel)') \
-                        .classes('flex-1') \
-                        .props('placeholder="ex: FR0011053068"')
+                    code_input = ui.input(
+                        'Code / ISIN (optionnel)'
+                    ).classes('flex-1').props('placeholder="ex: FR0011053068"')
                     devise_input = ui.select(
                         {'EUR': 'EUR €', 'USD': 'USD $', 'GBP': 'GBP £'},
                         value='EUR', label='Devise'
@@ -276,17 +411,20 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                         'current_price': None,
                     }
                     state['selected'] = ticker_data
+                    results_container.clear()
+                    search_input.value = ticker_data['name']
                     _render_purchase_form(ticker_data)
                     form_container.set_visibility(True)
 
-                with ui.row().classes('w-full justify-end mt-2'):
+                with ui.row().classes('w-full justify-end gap-2 mt-2'):
+                    ui.button('Annuler', on_click=lambda: results_container.clear()) \
+                        .props('flat')
                     ui.button('Continuer →', on_click=go_to_purchase) \
                         .props('unelevated').classes('bg-blue-600 text-white')
 
-        # ─── FORMULAIRE D'ACHAT ───
+        # ─── FORMULAIRE D'ACHAT (inchangé sauf cosmétique) ───
         def _render_purchase_form(t):
             form_container.clear()
-            # ... (Début du formulaire identique) ...
             updating = {'value': False}
 
             with form_container:
@@ -296,10 +434,12 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                 ):
                     with ui.row().classes('w-full items-center justify-between'):
                         with ui.column().classes('gap-0'):
-                            ui.label(t['name']).classes('text-base font-bold').style(
-                                f'color: {c["text_primary"]}'
-                            )
-                            sub = f'{t.get("symbol", "")} • {t.get("type", "")} • {t.get("currency", "EUR")}'
+                            ui.label(t['name']).classes(
+                                'text-base font-bold'
+                            ).style(f'color: {c["text_primary"]}')
+                            sub = (f'{t.get("symbol", "")} • '
+                                   f'{t.get("type", "")} • '
+                                   f'{t.get("currency", "EUR")}')
                             ui.label(sub).classes('text-xs').style(
                                 f'color: {c["text_secondary"]}'
                             )
@@ -338,8 +478,8 @@ def open_buy_dialog(portefeuille_id, c, refresh):
 
                 if t.get('current_price'):
                     price_info_label.text = (
-                        f"💹 Cours actuel du marché : {t['current_price']:.4f} "
-                        f"{t.get('currency', 'EUR')}"
+                        f"💹 Cours actuel du marché : "
+                        f"{t['current_price']:.4f} {t.get('currency', 'EUR')}"
                     )
 
                 async def update_price_for_date():
@@ -347,7 +487,6 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                         return
                     if t.get('source') == 'manual':
                         return
-
                     try:
                         target_date = datetime.strptime(
                             date_input.value, '%d/%m/%Y'
@@ -370,7 +509,6 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                         return
 
                     price_info_label.text = '⏳ Récupération du cours historique...'
-
                     source = t.get('source', 'yahoo')
                     symbol_or_url = (t.get('url') if source == 'boursorama'
                                      else t.get('symbol'))
@@ -380,21 +518,22 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                             get_price_at_date_with_currency,
                             symbol_or_url, source, target_date
                         )
-
                         if info['price'] is not None:
                             updating['value'] = True
                             prix_input.value = round(info['price'], 4)
                             price_state['last_auto_value'] = info['price']
                             updating['value'] = False
                             price_info_label.text = (
-                                f"💹 Cours du marché au {target_date.strftime('%d/%m/%Y')} : "
-                                f"{info['price']:.4f} {info.get('currency', 'EUR')}"
+                                f"💹 Cours du marché au "
+                                f"{target_date.strftime('%d/%m/%Y')} : "
+                                f"{info['price']:.4f} "
+                                f"{info.get('currency', 'EUR')}"
                             )
                             update_montant_from_qte()
                         else:
                             price_info_label.text = (
-                                f"⚠️ Cours historique non disponible "
-                                f"(saisie manuelle requise)"
+                                "⚠️ Cours historique non disponible "
+                                "(saisie manuelle requise)"
                             )
                     except Exception as e:
                         price_info_label.text = f"⚠️ Erreur : {e}"
@@ -415,15 +554,18 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                     price_state['manually_modified'] = False
                     asyncio.create_task(update_price_for_date())
 
-                # Sélecteur du Fonds Euro (Visible uniquement pour AV/PER)
+                # Sélecteur Fonds Euro source (AV/PER)
                 source_fonds_input = None
-                if is_av_per:  # (SIMPLIFIÉ) plus besoin de `and t.get('type') != 'Fonds Euro'`
+                if is_av_per:
                     if not fonds_euros:
-                        ui.label('⚠️ Aucun Fonds € existant pour financer cet achat.').classes(
-                            'text-red-500 text-sm font-bold mt-2')
+                        ui.label(
+                            '⚠️ Aucun Fonds € existant pour financer cet achat.'
+                        ).classes('text-red-500 text-sm font-bold mt-2')
                     else:
-                        options = {fe_id: f"{fe_data['nom']} ({format_money(fe_data['quantite'])})" for fe_id, fe_data
-                                   in fonds_euros.items()}
+                        options = {
+                            fe_id: f"{fe_data['nom']} ({format_money(fe_data['quantite'])})"
+                            for fe_id, fe_data in fonds_euros.items()
+                        }
                         source_fonds_input = ui.select(
                             options,
                             label='Fonds € source (pour le paiement) *',
@@ -435,8 +577,9 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                     'Frais (€)', value=0, format='%.2f', min=0
                 ).classes('w-full')
 
-                ui.label("Saisissez l'un OU l'autre").classes('text-xs italic mt-2') \
-                    .style(f'color: {c["text_secondary"]}')
+                ui.label("Saisissez l'un OU l'autre").classes(
+                    'text-xs italic mt-2'
+                ).style(f'color: {c["text_secondary"]}')
 
                 with ui.row().classes('w-full gap-3'):
                     is_action = t.get('type') == 'Action'
@@ -515,7 +658,6 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                         else:
                             total = m + f
                             warning = ''
-                            # (SIMPLIFIÉ) plus besoin de `and t.get('type') != 'Fonds Euro'`
                             if total > cash_dispo:
                                 warning = (f'\n⚠️ Solde insuffisant '
                                            f'({format_money(cash_dispo)} dispo)')
@@ -549,8 +691,8 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                             ui.notify('Quantité invalide', type='negative')
                             return
 
-                        # (AJOUTÉ) Sécurité pour bloquer l'achat d'un Fonds Euro
-                        if t.get('type') == 'Fonds Euro':
+                        # Sécurité : pas d'achat de Fonds €
+                        if t.get('type') in ('Fonds €', 'Fonds Euro'):
                             ui.notify(
                                 "Un Fonds Euro ne peut pas être 'acheté'. "
                                 "Il est alimenté par un versement.",
@@ -561,8 +703,10 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                         q = float(quantite_input.value)
                         p_unit = float(prix_input.value)
                         if is_action and q != int(q):
-                            ui.notify('Quantité entière requise pour une action',
-                                      type='negative')
+                            ui.notify(
+                                'Quantité entière requise pour une action',
+                                type='negative'
+                            )
                             return
 
                         frais = float(frais_input.value or 0)
@@ -572,8 +716,10 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                         if cur != 'EUR':
                             rate = get_currency_rate(cur, 'EUR')
                             if rate is None:
-                                ui.notify(f'Conversion {cur}→EUR impossible',
-                                          type='negative')
+                                ui.notify(
+                                    f'Conversion {cur}→EUR impossible',
+                                    type='negative'
+                                )
                                 return
                             prix_eur = p_unit * rate
 
@@ -581,12 +727,13 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                         total_eur = montant_titres_eur + frais
 
                         with get_session() as session:
-                            # VÉRIFICATION DU SOLDE (Cash ou Fonds €)
                             fe_pos = None
-                            # (SIMPLIFIÉ) La condition `if t.get('type') != 'Fonds Euro'` est maintenant toujours vraie
                             if is_av_per:
                                 if not source_fonds_input or not source_fonds_input.value:
-                                    ui.notify("Veuillez sélectionner un Fonds € source", type='warning')
+                                    ui.notify(
+                                        "Veuillez sélectionner un Fonds € source",
+                                        type='warning'
+                                    )
                                     return
                                 fe_id = source_fonds_input.value
                                 fe_pos = session.get(Position, fe_id)
@@ -607,7 +754,6 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                                 )
                                 return
 
-                            # ... (La suite du code de sauvegarde reste la même mais la logique est plus claire) ...
                             stmt = select(Position).where(
                                 Position.portefeuille_id == portefeuille_id,
                             )
@@ -630,7 +776,8 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                                 existing.prix_moyen = new_pru
                             else:
                                 cours_marche = prix_eur
-                                if t.get('source') in ('yahoo', 'boursorama') and t.get('current_price'):
+                                if t.get('source') in ('yahoo', 'boursorama') \
+                                        and t.get('current_price'):
                                     cours_marche = t['current_price']
                                     if cur != 'EUR':
                                         cours_marche = t['current_price'] * (
@@ -648,8 +795,6 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                                     cours_actuel=cours_marche,
                                     devise='EUR',
                                     date_ouverture=date_val,
-                                    # (MODIFIÉ) Un fonds euro ajouté manuellement n'a pas de sens ici,
-                                    # mais la logique auto_update reste correcte pour les autres cas manuels.
                                     auto_update=(t.get('source') != 'manual'),
                                 )
                                 session.add(new_pos)
@@ -670,7 +815,6 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                             session.add(tx_achat)
                             session.flush()
 
-                            # PAIEMENT / DÉDUCTION DU SOLDE
                             if is_av_per:
                                 fe_pos.quantite -= total_eur
 
@@ -701,21 +845,20 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                                     parent_transaction_id=tx_achat.id,
                                 )
                                 session.add(tx_frais)
-                                # (SIMPLIFIÉ) `and t.get('type') != 'Fonds Euro'` est redondant
                                 if not is_av_per:
                                     ajuster_cash(session, portefeuille_id,
                                                  impact_cash('frais', frais))
 
                             session.commit()
 
-                        ui.notify(f'✅ Achat de {q:g} × {t["name"][:30]} effectué',
-                                  type='positive')
+                        ui.notify(
+                            f'✅ Achat de {q:g} × {t["name"][:30]} effectué',
+                            type='positive'
+                        )
                         dialog.close()
                         refresh()
 
                     ui.button("🛒 Confirmer l'achat", on_click=save_achat) \
                         .props('unelevated').classes('bg-emerald-600 text-white')
-
-        switch_mode('action_etf')
 
     dialog.open()
