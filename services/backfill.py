@@ -90,14 +90,20 @@ def backfill_cours_historique(portefeuille_id: int) -> int:
 
 
 def backfill_valorisations(portefeuille_id: int) -> int:
-    """Reconstruit les snapshots quotidiens en rejouant les transactions."""
+    """Reconstruit les snapshots quotidiens en rejouant les transactions.
 
+    Règles arbitrages internes :
+    - Une transaction est "interne" si elle a un parent OU si elle est parente.
+    - Pour les achats/ventes/versements/retraits internes : NE PAS toucher au cash.
+      Seules les positions/quantités évoluent (transfert pur entre actifs).
+    - Pour les versements/retraits externes (sans lien parent/enfant) : impacter le cash.
+    """
     with get_session() as session:
         p = session.get(Portefeuille, portefeuille_id)
         if not p or not p.transactions:
             return 0
 
-        # Nettoyage
+        # Nettoyage des anciennes valorisations
         session.query(Valorisation).filter(
             Valorisation.portefeuille_id == portefeuille_id
         ).delete()
@@ -106,6 +112,12 @@ def backfill_valorisations(portefeuille_id: int) -> int:
         transactions = sorted(p.transactions, key=lambda t: t.date_operation)
         start_date = transactions[0].date_operation
         end_date = date.today()
+
+        # 🆕 Précalcul : IDs des transactions qui ont un enfant (= parents d'arbitrage)
+        parent_ids_with_child = {
+            t.parent_transaction_id for t in transactions
+            if t.parent_transaction_id is not None
+        }
 
         # Charger l'historique des cours pour tous les tickers présents dans les transactions
         tickers = set()
@@ -138,27 +150,29 @@ def backfill_valorisations(portefeuille_id: int) -> int:
 
         created = 0
         cash = 0.0
-        # Positions détenues par clé : {clé: {'ticker': T, 'quantite': X, 'pru': Y, 'nom': Z, 'categorie': C}}
-        # Clé = ticker (pour titres cotés) ou nom_titre (pour Fonds Euro, manuels, etc.)
         positions_held = {}
         tx_index = 0
         current_date = start_date
 
         while current_date <= end_date:
-            # Rejouer toutes les transactions du jour
             while tx_index < len(transactions) and transactions[tx_index].date_operation <= current_date:
                 t = transactions[tx_index]
 
-                # Déterminer la clé pour la position
                 key = t.ticker or t.code or t.nom_titre
-                # Si pas de clé spécifique, c'est un flux de cash général
                 is_asset_specific_tx = bool(key and t.quantite is not None)
+                is_arbitrage_child = t.parent_transaction_id is not None
+                is_arbitrage_parent = t.id in parent_ids_with_child
+                # 🛡️ Une tx est "interne" si elle est parent OU enfant d'arbitrage
+                is_internal = is_arbitrage_child or is_arbitrage_parent
 
+                # ─────────────────────────────────────────────
+                # VERSEMENT
+                # ─────────────────────────────────────────────
                 if t.type_operation == 'versement':
-                    if is_asset_specific_tx: # Versement dans un actif spécifique (ex: Fonds Euro)
+                    if is_asset_specific_tx:
+                        # Versement vers un actif (Fonds €)
                         if key in positions_held:
                             positions_held[key]['quantite'] += t.quantite
-                            # Le PRU ne change généralement pas pour les versements (surtout Fonds Euro)
                         else:
                             positions_held[key] = {
                                 'ticker': t.ticker,
@@ -167,41 +181,53 @@ def backfill_valorisations(portefeuille_id: int) -> int:
                                 'nom': t.nom_titre,
                                 'categorie': t.categorie,
                             }
-                    else: # Versement de cash général
+                        # Cash : NE PAS toucher (que ce soit versement initial sur Fonds €
+                        # ou arbitrage IN — dans les deux cas le cash n'est pas concerné)
+                    else:
+                        # Vrai apport externe d'argent en cash
                         cash += t.montant
+
+                # ─────────────────────────────────────────────
+                # RETRAIT
+                # ─────────────────────────────────────────────
                 elif t.type_operation == 'retrait':
-                    if is_asset_specific_tx: # Retrait d'un actif spécifique
+                    if is_asset_specific_tx:
                         if key in positions_held:
                             positions_held[key]['quantite'] -= t.quantite
-                    else: # Retrait de cash général
+                        # Cash inchangé
+                    else:
                         cash -= t.montant
-                elif t.type_operation == 'interets': # Intérêts réinvestis ou en cash
-                    if is_asset_specific_tx: # Intérêts réinvestis dans l'actif
+
+                # ─────────────────────────────────────────────
+                # INTÉRÊTS (Fonds €)
+                # ─────────────────────────────────────────────
+                elif t.type_operation == 'interets':
+                    if is_asset_specific_tx:
                         if key in positions_held:
                             positions_held[key]['quantite'] += t.quantite
-                            # Le PRU sera ajusté par les dividendes réinvestis, mais les intérêts
-                            # simples n'impactent pas le PRU unitaire d'un fonds euro par exemple
-                            # le PRU reste 1.0. Si c'est un autre type d'actif, la logique PRU est plus complexe.
-                            # Pour la simplification actuelle, on ajoute juste la quantité.
-                        else: # Si l'actif n'existe pas encore (cas limite)
-                             positions_held[key] = {
+                        else:
+                            positions_held[key] = {
                                 'ticker': t.ticker,
                                 'quantite': t.quantite,
                                 'pru': t.prix_unitaire if t.prix_unitaire is not None else 1.0,
                                 'nom': t.nom_titre,
                                 'categorie': t.categorie,
                             }
-                    else: # Intérêts versés en cash
+                    else:
                         cash += t.montant
-                elif t.type_operation == 'dividende': # Dividendes réinvestis ou en cash
-                    if is_asset_specific_tx: # Dividende réinvesti dans l'actif
+
+                # ─────────────────────────────────────────────
+                # DIVIDENDE
+                # ─────────────────────────────────────────────
+                elif t.type_operation == 'dividende':
+                    if is_asset_specific_tx:
                         if key in positions_held:
                             old = positions_held[key]
                             new_qte = old['quantite'] + t.quantite
                             new_pru = (
-                                              (old['quantite'] * old['pru']) +
-                                              (t.quantite * t.prix_unitaire)
-                                      ) / new_qte if new_qte > 0 else 0
+                                (old['quantite'] * old['pru']) +
+                                (t.quantite * (t.prix_unitaire or 0))
+                            ) / new_qte if new_qte > 0 else (t.prix_unitaire or 0)
                             old['quantite'] = new_qte
                             old['pru'] = new_pru
                         else:
@@ -212,25 +238,34 @@ def backfill_valorisations(portefeuille_id: int) -> int:
                                 'nom': t.nom_titre,
                                 'categorie': t.categorie,
                             }
-                    else: # Dividende versé en cash
+                    else:
                         cash += t.montant
+
+                # ─────────────────────────────────────────────
+                # FRAIS
+                # ─────────────────────────────────────────────
                 elif t.type_operation == 'frais':
-                    if is_asset_specific_tx: # Frais en parts d'un actif spécifique
+                    if is_asset_specific_tx:
                         if key in positions_held:
                             positions_held[key]['quantite'] -= t.quantite
-                    else: # Frais en euros (impactent le cash)
+                    else:
                         cash -= t.montant
+
+                # ─────────────────────────────────────────────
+                # ACHAT
+                # ─────────────────────────────────────────────
                 elif t.type_operation == 'achat':
-                    # L'achat réduit le cash et augmente la position
-                    cash -= t.montant
+                    # 🛡️ Arbitrage interne : l'argent vient d'un Fonds € (pas du cash)
+                    if not is_internal:
+                        cash -= t.montant
                     if t.quantite is not None and t.prix_unitaire is not None:
                         if key in positions_held:
                             old = positions_held[key]
                             new_qte = old['quantite'] + t.quantite
                             new_pru = (
-                                              (old['quantite'] * old['pru']) +
-                                              (t.quantite * t.prix_unitaire)
-                                      ) / new_qte
+                                (old['quantite'] * old['pru']) +
+                                (t.quantite * t.prix_unitaire)
+                            ) / new_qte if new_qte > 0 else t.prix_unitaire
                             old['quantite'] = new_qte
                             old['pru'] = new_pru
                         else:
@@ -241,17 +276,22 @@ def backfill_valorisations(portefeuille_id: int) -> int:
                                 'nom': t.nom_titre,
                                 'categorie': t.categorie,
                             }
+
+                # ─────────────────────────────────────────────
+                # VENTE
+                # ─────────────────────────────────────────────
                 elif t.type_operation == 'vente':
-                    # La vente augmente le cash et réduit la position
-                    cash += t.montant
+                    # 🛡️ Arbitrage interne : l'argent va vers un Fonds € (pas vers le cash)
+                    if not is_internal:
+                        cash += t.montant
                     if t.quantite is not None and key in positions_held:
                         positions_held[key]['quantite'] -= t.quantite
-                        # On pourrait ajuster le PRU si c'est une vente partielle, mais le modèle actuel
-                        # du backfill n'ajuste pas le PRU à la vente. La "position" est juste la quantité restante.
 
                 tx_index += 1
 
-            # Calculer la valorisation des titres détenus
+            # ─────────────────────────────────────────────
+            # Calcul de la valorisation des titres détenus
+            # ─────────────────────────────────────────────
             valo_titres = 0.0
             for key, pos in positions_held.items():
                 qte = pos['quantite']
@@ -264,10 +304,8 @@ def backfill_valorisations(portefeuille_id: int) -> int:
                     if cours is not None:
                         valo_titres += qte * cours
                     else:
-                        # Fallback : PRU si pas de cours (ou Fonds Euro dont le PRU est le cours)
                         valo_titres += qte * pos['pru']
                 else:
-                    # Pas de ticker : on utilise toujours le PRU (OPCVM, SCPI, Fonds Euro)
                     valo_titres += qte * pos['pru']
 
             valo_totale = cash + valo_titres
@@ -283,7 +321,6 @@ def backfill_valorisations(portefeuille_id: int) -> int:
 
         session.commit()
         return created
-
 
 def backfill_portefeuille(portefeuille_id: int) -> dict:
     """Lance le backfill complet : cours historiques + valorisations."""

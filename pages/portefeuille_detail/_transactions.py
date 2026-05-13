@@ -296,8 +296,17 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
             on_change=on_type_change,
         ).classes('w-full')
 
-        if is_edit and data['type_operation'] not in ('achat', 'vente'):
+        if is_edit:
             type_input.props('readonly')
+            # 🛡️ Achat/vente non éditables ici : on prévient et on ferme
+            if data['type_operation'] in ('achat', 'vente'):
+                ui.notify(
+                    "L'édition des achats/ventes n'est pas supportée. "
+                    "Veuillez supprimer et recréer la transaction.",
+                    type='warning', timeout=5000
+                )
+                # On ferme le dialogue dès qu'il s'ouvre
+                ui.timer(0.1, lambda: dialog.close(), once=True)
 
         if is_av_per:
             if not fonds_euros_dict:
@@ -934,23 +943,146 @@ def _confirm_delete_transaction(transaction_id, libelle, refresh):
                     return
 
                 portefeuille = session.get(Portefeuille, t.portefeuille_id)
-                is_av_per_for_tx = portefeuille.type in ['Assurance-Vie', 'AV', 'PER', 'Assurance Vie']
-                fonds_euro_id_affected = None
-                if is_av_per_for_tx and t.nom_titre and t.categorie == 'Fonds Euro' \
-                        and t.type_operation in ['versement', 'retrait', 'interets', 'frais', 'dividende']:
-                    fe_pos = session.execute(
-                        select(Position).where(
-                            Position.portefeuille_id == t.portefeuille_id,
-                            Position.nom == t.nom_titre,
-                            Position.categorie == 'Fonds Euro'
-                        )
-                    ).scalar_one_or_none()
-                    if fe_pos:
-                        fonds_euro_id_affected = fe_pos.id
+                is_av_per_for_tx = portefeuille.type in [
+                    'Assurance-Vie', 'AV', 'PER', 'Assurance Vie'
+                ]
 
-                # Gérer la suppression d'un dividende réinvesti en parts
-                if (t.type_operation == 'dividende' and t.quantite is not None and t.quantite > 0 and
-                        t.prix_unitaire is not None and t.prix_unitaire > 0 and t.nom_titre):
+                # ═══════════════════════════════════════════════════════════
+                # CAS 1 : ACHAT (potentiellement parent d'arbitrage)
+                # ═══════════════════════════════════════════════════════════
+                if t.type_operation == 'achat':
+                    # Restaurer/diminuer la position du titre acheté
+                    if t.quantite and t.nom_titre:
+                        bought_pos = session.execute(
+                            select(Position).where(
+                                Position.portefeuille_id == t.portefeuille_id,
+                                Position.nom == t.nom_titre,
+                            )
+                        ).scalar_one_or_none()
+
+                        if bought_pos:
+                            new_qty = (bought_pos.quantite or 0) - t.quantite
+                            if new_qty <= 0.0001:
+                                session.delete(bought_pos)
+                            else:
+                                # Recalcul du PRU (annulation de l'achat dans la moyenne)
+                                old_qty = bought_pos.quantite or 0
+                                old_pru = bought_pos.prix_moyen or 0
+                                old_invest = old_qty * old_pru
+                                cancelled_invest = t.quantite * (t.prix_unitaire or 0)
+                                new_invest = old_invest - cancelled_invest
+                                bought_pos.quantite = new_qty
+                                bought_pos.prix_moyen = new_invest / new_qty if new_qty > 0 else 0
+
+                    # Traiter les enfants (arbitrage vente Fonds € + frais éventuels)
+                    for child in list(t.children):
+                        if child.type_operation == 'vente' and is_av_per_for_tx:
+                            # 🛡️ Arbitrage vente Fonds € → réinjecter la quantité au Fonds €
+                            if child.nom_titre and child.quantite:
+                                fe_pos = session.execute(
+                                    select(Position).where(
+                                        Position.portefeuille_id == child.portefeuille_id,
+                                        Position.nom == child.nom_titre,
+                                        Position.categorie.in_(['Fonds €', 'Fonds Euro']),
+                                    )
+                                ).scalar_one_or_none()
+                                if fe_pos:
+                                    fe_pos.quantite += child.quantite
+                        elif child.type_operation == 'frais':
+                            # Annuler l'impact des frais
+                            if is_av_per_for_tx:
+                                # Frais en parts ou frais sur Fonds €
+                                if child.nom_titre and child.quantite:
+                                    charged_pos = session.execute(
+                                        select(Position).where(
+                                            Position.portefeuille_id == child.portefeuille_id,
+                                            Position.nom == child.nom_titre,
+                                        )
+                                    ).scalar_one_or_none()
+                                    if charged_pos:
+                                        charged_pos.quantite += child.quantite
+                            else:
+                                # Frais sur cash (PEA/CTO)
+                                impact_inv = -impact_cash(child.type_operation, child.montant)
+                                ajuster_cash(session, child.portefeuille_id, impact_inv)
+                        session.delete(child)
+
+                    # Pour PEA/CTO (pas AV/PER) : restaurer le cash débité par l'achat
+                    if not is_av_per_for_tx:
+                        impact_inv = -impact_cash('achat', t.montant)
+                        ajuster_cash(session, t.portefeuille_id, impact_inv)
+
+                # ═══════════════════════════════════════════════════════════
+                # CAS 2 : VENTE (potentiellement parent d'arbitrage)
+                # ═══════════════════════════════════════════════════════════
+                elif t.type_operation == 'vente':
+                    # Restaurer la position du titre vendu
+                    if t.quantite and t.nom_titre and t.prix_unitaire:
+                        sold_pos = session.execute(
+                            select(Position).where(
+                                Position.portefeuille_id == t.portefeuille_id,
+                                Position.nom == t.nom_titre,
+                            )
+                        ).scalar_one_or_none()
+
+                        if sold_pos:
+                            # Position existe encore (vente partielle) → on rajoute la quantité
+                            # ⚠️ PRU non recalculé côté restauration (la vente n'avait pas changé le PRU)
+                            sold_pos.quantite += t.quantite
+                        else:
+                            # Position avait été supprimée (vente totale) → on la recrée
+                            new_pos = Position(
+                                portefeuille_id=t.portefeuille_id,
+                                nom=t.nom_titre,
+                                ticker=t.ticker,
+                                code=t.code,
+                                categorie=t.categorie,
+                                quantite=t.quantite,
+                                prix_moyen=t.prix_unitaire,
+                                cours_actuel=t.prix_unitaire,
+                            )
+                            session.add(new_pos)
+
+                    # Traiter les enfants
+                    for child in list(t.children):
+                        if child.type_operation == 'versement' and is_av_per_for_tx:
+                            # 🛡️ Arbitrage versement vers Fonds € → reprélever la quantité
+                            if child.nom_titre and child.quantite:
+                                fe_pos = session.execute(
+                                    select(Position).where(
+                                        Position.portefeuille_id == child.portefeuille_id,
+                                        Position.nom == child.nom_titre,
+                                        Position.categorie.in_(['Fonds €', 'Fonds Euro']),
+                                    )
+                                ).scalar_one_or_none()
+                                if fe_pos:
+                                    fe_pos.quantite -= child.quantite
+                        elif child.type_operation == 'frais':
+                            if is_av_per_for_tx:
+                                if child.nom_titre and child.quantite:
+                                    charged_pos = session.execute(
+                                        select(Position).where(
+                                            Position.portefeuille_id == child.portefeuille_id,
+                                            Position.nom == child.nom_titre,
+                                        )
+                                    ).scalar_one_or_none()
+                                    if charged_pos:
+                                        charged_pos.quantite += child.quantite
+                            else:
+                                impact_inv = -impact_cash(child.type_operation, child.montant)
+                                ajuster_cash(session, child.portefeuille_id, impact_inv)
+                        session.delete(child)
+
+                    # Pour PEA/CTO : reprélever le cash crédité par la vente
+                    if not is_av_per_for_tx:
+                        impact_inv = -impact_cash('vente', t.montant)
+                        ajuster_cash(session, t.portefeuille_id, impact_inv)
+
+                # ═══════════════════════════════════════════════════════════
+                # CAS 3 : DIVIDENDE RÉINVESTI EN PARTS
+                # ═══════════════════════════════════════════════════════════
+                elif (t.type_operation == 'dividende' and t.quantite and t.quantite > 0
+                      and t.prix_unitaire and t.prix_unitaire > 0 and t.nom_titre):
                     source_pos = session.execute(
                         select(Position).where(
                             Position.portefeuille_id == t.portefeuille_id,
@@ -960,7 +1092,6 @@ def _confirm_delete_transaction(transaction_id, libelle, refresh):
 
                     if source_pos:
                         parts_a_retirer = t.quantite
-
                         old_qty = source_pos.quantite or 0
                         old_pru = source_pos.prix_moyen or 0
 
@@ -969,53 +1100,62 @@ def _confirm_delete_transaction(transaction_id, libelle, refresh):
                             source_pos.prix_moyen = 0
                         else:
                             new_qty = old_qty - parts_a_retirer
-                            if new_qty > 0:
-                                new_pru = ((old_qty * old_pru) - (parts_a_retirer * t.prix_unitaire)) / new_qty
-                                source_pos.quantite = new_qty
-                                source_pos.prix_moyen = new_pru
-                            else:
-                                source_pos.quantite = 0
-                                source_pos.prix_moyen = 0
+                            new_pru = ((old_qty * old_pru) - (
+                                        parts_a_retirer * t.prix_unitaire)) / new_qty if new_qty > 0 else 0
+                            source_pos.quantite = new_qty
+                            source_pos.prix_moyen = new_pru
 
-                # (NOUVEAU AMÉLIORATION) Gérer la suppression d'un frais en parts
-                elif (t.type_operation == 'frais' and t.quantite is not None and t.quantite > 0 and
-                      t.prix_unitaire is not None and t.prix_unitaire > 0 and t.nom_titre):
+                # ═══════════════════════════════════════════════════════════
+                # CAS 4 : FRAIS EN PARTS
+                # ═══════════════════════════════════════════════════════════
+                elif (t.type_operation == 'frais' and t.quantite and t.quantite > 0
+                      and t.prix_unitaire and t.prix_unitaire > 0 and t.nom_titre
+                      and t.categorie not in ('Fonds €', 'Fonds Euro')):
                     source_pos = session.execute(
                         select(Position).where(
                             Position.portefeuille_id == t.portefeuille_id,
                             Position.nom == t.nom_titre,
                         )
                     ).scalar_one_or_none()
-
                     if source_pos:
-                        parts_a_rajouter = t.quantite
-                        # Quand on supprime un frais en parts, on rajoute les parts.
-                        # Le PRU des parts existantes ne change pas.
-                        source_pos.quantite += parts_a_rajouter
-                        # Le prix moyen n'est pas modifié ici, car la déduction/ajout de frais
-                        # n'est pas censée modifier le coût moyen d'acquisition des parts restantes/ajoutées.
+                        source_pos.quantite += t.quantite
 
-                else:  # Gestion des autres types de transactions (y compris dividende cash et frais cash)
-                    # Annuler l'impact des transactions enfants (frais liés)
+                # ═══════════════════════════════════════════════════════════
+                # CAS 5 : FLUX SUR FONDS € (versement, retrait, intérêts, dividende cash, frais cash)
+                # ═══════════════════════════════════════════════════════════
+                elif is_av_per_for_tx and t.nom_titre and t.categorie in ('Fonds €', 'Fonds Euro'):
+                    fe_pos = session.execute(
+                        select(Position).where(
+                            Position.portefeuille_id == t.portefeuille_id,
+                            Position.nom == t.nom_titre,
+                            Position.categorie.in_(['Fonds €', 'Fonds Euro']),
+                        )
+                    ).scalar_one_or_none()
+                    if fe_pos:
+                        if t.type_operation in ('versement', 'dividende', 'interets'):
+                            fe_pos.quantite -= t.montant
+                        elif t.type_operation in ('retrait', 'frais'):
+                            fe_pos.quantite += t.montant
+
+                    # Traiter les enfants (frais associés)
+                    for child in list(t.children):
+                        if child.type_operation == 'frais' and fe_pos:
+                            fe_pos.quantite += child.montant
+                        session.delete(child)
+
+                # ═══════════════════════════════════════════════════════════
+                # CAS 6 : FLUX CASH (PEA/CTO uniquement)
+                # ═══════════════════════════════════════════════════════════
+                else:
+                    # Annuler les enfants (frais)
                     for child in list(t.children):
                         if child.type_operation == 'frais':
-                            if is_av_per_for_tx and fonds_euro_id_affected:
-                                fe = session.get(Position, fonds_euro_id_affected)
-                                if fe: fe.quantite += child.montant
-                            else:
-                                impact_inv = -impact_cash(child.type_operation, child.montant)
-                                ajuster_cash(session, child.portefeuille_id, impact_inv)
-                            session.delete(child)
+                            impact_inv = -impact_cash(child.type_operation, child.montant)
+                            ajuster_cash(session, child.portefeuille_id, impact_inv)
+                        session.delete(child)
 
-                    # Annuler l'impact de la transaction principale sur le cash/Fonds Euro
-                    if is_av_per_for_tx and fonds_euro_id_affected:
-                        fe = session.get(Position, fonds_euro_id_affected)
-                        if fe:
-                            if t.type_operation in ['versement', 'dividende', 'interets']:
-                                fe.quantite -= t.montant
-                            elif t.type_operation in ['retrait', 'frais']:
-                                fe.quantite += t.montant
-                    else:
+                    # Annuler la transaction principale sur le cash
+                    if not is_av_per_for_tx:
                         impact_inverse = -impact_cash(t.type_operation, t.montant)
                         ajuster_cash(session, t.portefeuille_id, impact_inverse)
 
@@ -1025,7 +1165,6 @@ def _confirm_delete_transaction(transaction_id, libelle, refresh):
             ui.notify(f'"{libelle}" supprimée', type='warning')
             dialog.close()
             refresh()
-
         with ui.row().classes('w-full justify-end gap-2'):
             ui.button('Annuler', on_click=dialog.close).props('flat')
             ui.button('Supprimer', on_click=do_delete).props('unelevated') \

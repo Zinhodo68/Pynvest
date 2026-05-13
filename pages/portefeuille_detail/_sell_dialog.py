@@ -28,8 +28,8 @@ def open_sell_dialog(portefeuille_id, c, refresh):
         positions = session.execute(
             select(Position).where(
                 Position.portefeuille_id == portefeuille_id,
-                Position.nom != 'Cash',
                 Position.quantite > 0,
+                ~Position.categorie.in_(['Cash', 'Fonds €', 'Fonds Euro']),
             ).order_by(Position.nom)
         ).scalars().all()
         positions_data = [p.to_dict() for p in positions]
@@ -40,8 +40,8 @@ def open_sell_dialog(portefeuille_id, c, refresh):
             fonds_euro_positions = session.execute(
                 select(Position).where(
                     Position.portefeuille_id == portefeuille_id,
-                    Position.categorie == 'Fonds Euro',
-                    Position.quantite > 0  # Seulement les Fonds Euro avec une quantité > 0
+                    Position.categorie.in_(['Fonds €', 'Fonds Euro']),
+                    Position.quantite > 0,
                 ).order_by(Position.nom)
             ).scalars().all()
 

@@ -22,12 +22,15 @@ def render_chart(valorisations, transactions, color, c, is_dark):
 
     valo_by_date = {str(v['date']): v['montant'] for v in valorisations}
 
-    # Apports cumulés
+    # Apports cumulés — UNIQUEMENT les flux externes (parent_transaction_id is None)
     apports_par_date = {}
     cumul = 0
     for d in sorted_dates:
         for t in transactions:
             if str(t['date']) == d:
+                # 🚫 Exclure les arbitrages internes
+                if t.get('parent_transaction_id') is not None:
+                    continue
                 if t['type'] == 'versement':
                     cumul += t['montant']
                 elif t['type'] == 'retrait':

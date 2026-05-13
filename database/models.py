@@ -71,6 +71,12 @@ class Portefeuille(Base):
 
     @property
     def valorisation_actuelle(self):
+        """Valeur actuelle du portefeuille = somme des positions.
+
+        Note : pour les portefeuilles avec cash résiduel non représenté en Position,
+        il faudrait ajouter le cash. Actuellement, on suppose que tout est en positions
+        (Fonds €, titres, livrets…).
+        """
         if self.positions:
             return sum(pos.valorisation for pos in self.positions)
         if self.valorisations:
@@ -79,8 +85,16 @@ class Portefeuille(Base):
 
     @property
     def total_verse(self):
+        """Capital investi = uniquement les flux EXTERNES.
+
+        Exclut les arbitrages internes (transactions avec parent_transaction_id),
+        qui sont des transferts entre actifs sans création de richesse.
+        """
         total = 0.0
         for t in self.transactions:
+            # 🛡️ Exclure les arbitrages internes
+            if t.parent_transaction_id is not None:
+                continue
             if t.type_operation == 'versement':
                 total += t.montant
             elif t.type_operation == 'retrait':

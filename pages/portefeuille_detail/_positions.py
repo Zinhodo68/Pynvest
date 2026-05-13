@@ -54,12 +54,35 @@ def render_positions_section(positions, data, c, portefeuille_id, refresh):
             ui.label('+/-').style('width: 130px; text-align: right;')
             ui.label('').style('width: 40px;')
 
-        for pos in positions:
+        # 🆕 Séparation titres / réserves de liquidités
+        RESERVES_CATEGORIES = {'Cash', 'Fonds €', 'Fonds Euro'}
+
+        def is_reserve(p):
+            return p['nom'] == 'Cash' or (p.get('categorie') in RESERVES_CATEGORIES)
+
+        titres = [p for p in positions if not is_reserve(p)]
+        reserves = [p for p in positions if is_reserve(p)]
+
+        # Affichage des titres
+        for pos in titres:
+            _render_position_row(pos, c, portefeuille_id, refresh)
+
+        # 🆕 Séparateur visuel si présence des deux groupes
+        if titres and reserves:
+            with ui.row().classes('w-full px-5 py-2 items-center').style(
+                f'border-top: 2px dashed {c["card_border"]}; '
+                f'background-color: {c["card_border"]}15;'
+            ):
+                ui.label('💰 Réserves de liquidités').classes(
+                    'text-xs font-semibold uppercase tracking-wider'
+                ).style(f'color: {c["text_secondary"]};')
+
+        # Affichage des réserves
+        for pos in reserves:
             _render_position_row(pos, c, portefeuille_id, refresh)
 
         # Footer total
         _render_positions_footer(total_pru, total_valo, total_pv, c)
-
 
 def _render_position_row(pos, c, portefeuille_id, refresh):
     cat_info = get_categorie_info(pos['categorie'])
