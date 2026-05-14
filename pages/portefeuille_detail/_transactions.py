@@ -10,6 +10,28 @@ from utils.formatters import format_money, format_date_fr
 from pages.portefeuille_detail._cash_helpers import impact_cash, ajuster_cash
 
 
+def _trigger_backfill_if_needed(portefeuille_id: int, has_ticker: bool):
+    """Lance le backfill cours+valorisations si la transaction touche un titre Yahoo.
+
+    Appelé après création/suppression de transactions qui modifient des positions.
+    Doit être appelé HORS d'un bloc `with get_session()` pour éviter les locks SQLite.
+    """
+    if not has_ticker:
+        # Quand même backfiller les valorisations (sans re-télécharger les cours)
+        try:
+            from services.backfill import backfill_valorisations
+            backfill_valorisations(portefeuille_id)
+        except Exception as e:
+            print(f'⚠️ Backfill valorisations échoué : {e}')
+        return
+    try:
+        from services.backfill import backfill_cours_historique, backfill_valorisations
+        backfill_cours_historique(portefeuille_id)
+        backfill_valorisations(portefeuille_id)
+    except Exception as e:
+        print(f'⚠️ Backfill échoué : {e}')
+
+
 def render_transactions_card(transactions, c, is_dark, refresh, portefeuille_id,
                              full_width=False):
     # ✨ Séparer les transactions principales des frais liés
@@ -94,7 +116,6 @@ def render_transactions_card(transactions, c, is_dark, refresh, portefeuille_id,
                                 display_libelle += ' (C)'
                             else:
                                 display_libelle += ' (D)'
-                        # (NOUVEAU AMÉLIORATION) Indiquer si les frais sont en parts
                         elif t['type'] == 'frais':
                             if (t.get('quantite') is not None and t.get('quantite') > 0 and
                                     t.get('prix_unitaire') is not None and t.get('prix_unitaire') > 0):
@@ -112,13 +133,11 @@ def render_transactions_card(transactions, c, is_dark, refresh, portefeuille_id,
                         if total_frais > 0:
                             sub_text += f' • +{format_money(total_frais, decimals=2)} de frais'
 
-                        # (MODIFIÉ) Afficher l'actif source + détails de parts si dividende (C) ou frais en parts
                         if t['type'] == 'dividende' and t.get('nom_titre'):
                             sub_text += f' • Actif: {t["nom_titre"]}'
                             if (t.get('quantite') is not None and t.get('quantite') > 0 and
                                     t.get('prix_unitaire') is not None and t.get('prix_unitaire') > 0):
                                 sub_text += f' ({t["quantite"]:g} parts @ {t["prix_unitaire"]:.4f}€)'
-                        # (NOUVEAU AMÉLIORATION) Détails pour les frais en parts
                         elif t['type'] == 'frais' and t.get('nom_titre') and \
                                 (t.get('quantite') is not None and t.get('quantite') > 0 and
                                  t.get('prix_unitaire') is not None and t.get('prix_unitaire') > 0):
@@ -162,13 +181,11 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
         'montant': 0.0,
         'libelle': '',
         'source_position_id': None,
-        # (NOUVEAU AMÉLIORATION) Initialiser l'état du toggle frais
-        'initial_fee_type': 'cash',  # 'cash' ou 'parts'
+        'initial_fee_type': 'cash',
         'initial_fee_parts_quantity': 0.0,
     }
     frais_existants = 0
 
-    # 1. Détection du type de portefeuille et récupération des Fonds € / Actifs sources de dividendes / Actifs pour frais en parts
     with get_session() as session:
         ptf = session.get(Portefeuille, portefeuille_id)
         is_av_per = ptf.type in ['Assurance-Vie', 'AV', 'PER', 'Assurance Vie']
@@ -184,14 +201,13 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
             for fe in fonds_euros_db:
                 fonds_euros_dict[fe.id] = fe.nom
 
-        # Récupérer les positions qui peuvent être des sources de dividendes ou des cibles pour frais en parts
-        chargeable_positions_db = session.execute(  # (MODIFIÉ) Renommé pour être plus générique
+        chargeable_positions_db = session.execute(
             select(Position).where(
                 Position.portefeuille_id == portefeuille_id,
                 Position.categorie.not_in(['Fonds Euro', 'Cash'])
             )
         ).scalars().all()
-        chargeable_positions_options = {  # (MODIFIÉ) Renommé
+        chargeable_positions_options = {
             pos.id: {'nom': pos.nom, 'quantite': pos.quantite, 'cours_actuel': pos.cours_actuel}
             for pos in chargeable_positions_db
         }
@@ -204,7 +220,6 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                 data['montant'] = t.montant
                 data['libelle'] = t.libelle or ''
 
-                # Charger la source si applicable (pour dividende et frais en parts)
                 if t.nom_titre:
                     source_pos_from_tx = session.execute(
                         select(Position.id).where(
@@ -216,7 +231,6 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                     if source_pos_from_tx:
                         data['source_position_id'] = source_pos_from_tx
 
-                # (NOUVEAU AMÉLIORATION) Charger l'état initial des frais en parts pour l'édition
                 if t.type_operation == 'frais':
                     if t.quantite is not None and t.quantite > 0 and \
                             t.prix_unitaire is not None and t.prix_unitaire > 0:
@@ -225,14 +239,12 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                     else:
                         data['initial_fee_type'] = 'cash'
 
-    # --- DÉFINITIONS DE VARIABLES NÉCESSAIRES AVANT LE DIALOGUE ---
     is_initial_achat_vente_edit = is_edit and data['type_operation'] in ('achat', 'vente')
 
     date_initiale_fr = date.fromisoformat(data['date_operation']).strftime('%d/%m/%Y')
 
     last_dividend_input_changed = {'value': None}
-    # (NOUVEAU AMÉLIORATION) État pour gérer la double saisie frais en parts
-    last_fees_parts_input_changed = {'value': None}  # 'deduct_qty' ou 'final_qty'
+    last_fees_parts_input_changed = {'value': None}
 
     with ui.dialog() as dialog, ui.card().classes('p-6 gap-4').style(
             f'background-color: {c["card_bg"]}; '
@@ -255,22 +267,22 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
 
         type_input = None
         fonds_euro_select = None
-        dividend_source_select = None  # Reste pour la clarté du code des dividendes
-        fees_asset_select = None  # (NOUVEAU AMÉLIORATION) Sélecteur pour l'actif des frais en parts
-        no_chargeable_assets_label = None  # (NOUVEAU AMÉLIORATION) Pour l'avertissement quand pas d'actifs pour frais en parts
-        no_dividend_sources_label = None  # Reste pour la clarté
+        dividend_source_select = None
+        fees_asset_select = None
+        no_chargeable_assets_label = None
+        no_dividend_sources_label = None
         reinvest_checkbox = None
-        fee_type_toggle = None  # (NOUVEAU AMÉLIORATION) Toggle pour les frais
+        fee_type_toggle = None
         date_input_ui_element = None
         date_picker = None
         montant_input = None
         dividend_per_share_input = None
         dividend_parts_input = None
-        fees_parts_to_deduct_input = None  # (NOUVEAU AMÉLIORATION)
-        fees_final_parts_qty_input = None  # (NOUVEAU AMÉLIORATION)
-        current_fees_parts_qty_label = None  # (NOUVEAU AMÉLIORATION)
+        fees_parts_to_deduct_input = None
+        fees_final_parts_qty_input = None
+        current_fees_parts_qty_label = None
         libelle_input = None
-        frais_input = None  # Ceci est pour les frais liés aux Achat/Vente, pas pour le type 'frais'
+        frais_input = None
         info_label = None
 
         def on_type_change(e):
@@ -287,8 +299,6 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                     return
             update_visibility()
 
-        # --- CRÉATION DES ÉLÉMENTS UI DANS LE BON ORDRE ---
-
         type_input = ui.select(
             type_options,
             value=data['type_operation'],
@@ -298,14 +308,12 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
 
         if is_edit:
             type_input.props('readonly')
-            # 🛡️ Achat/vente non éditables ici : on prévient et on ferme
             if data['type_operation'] in ('achat', 'vente'):
                 ui.notify(
                     "L'édition des achats/ventes n'est pas supportée. "
                     "Veuillez supprimer et recréer la transaction.",
                     type='warning', timeout=5000
                 )
-                # On ferme le dialogue dès qu'il s'ouvre
                 ui.timer(0.1, lambda: dialog.close(), once=True)
 
         if is_av_per:
@@ -319,33 +327,28 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                     value=list(fonds_euros_dict.keys())[0] if fonds_euros_dict else None
                 ).classes('w-full')
 
-        # Sélecteur de l'actif source pour les dividendes
-        if chargeable_positions_options:  # (MODIFIÉ) Utiliser la liste générique
+        if chargeable_positions_options:
             dividend_source_select = ui.select(
                 {idx: d['nom'] for idx, d in chargeable_positions_options.items()},
                 label='Actif source du dividende *',
                 value=data['source_position_id'] if is_edit and data.get('source_position_id') and data[
-                    'type_operation'] == 'dividende' else None  # (MODIFIÉ) Charger si c'est un dividende
+                    'type_operation'] == 'dividende' else None
             ).classes('w-full')
-            # (NOUVEAU AMÉLIORATION) Sélecteur pour l'actif des frais en parts (partage la même liste d'options)
             fees_asset_select = ui.select(
                 {idx: d['nom'] for idx, d in chargeable_positions_options.items()},
                 label='Actif à débiter (parts) *',
                 value=data['source_position_id'] if is_edit and data.get('source_position_id') and data[
-                    'type_operation'] == 'frais' else None  # (MODIFIÉ) Charger si c'est un frais en parts
+                    'type_operation'] == 'frais' else None
             ).classes('w-full')
         else:
-            # (MODIFIÉ) Avertissement générique pour l'absence d'actifs chargeables
             no_chargeable_assets_label = ui.label("⚠️ Aucun actif (hors Cash/Fonds €) trouvé dans ce portefeuille.") \
                 .classes('text-red-500 text-xs font-bold')
-            # no_dividend_sources_label n'est plus nécessaire car remplacé par no_chargeable_assets_label
 
         reinvest_checkbox = ui.checkbox(
             'Dividende réinvesti en parts',
             value=False
         ).classes('mt-0')
 
-        # (NOUVEAU AMÉLIORATION) Toggle pour le type de frais (cash ou parts)
         fee_type_toggle = ui.toggle(
             {'cash': 'Frais en euros', 'parts': 'Frais en parts'},
             value=data['initial_fee_type'] if is_edit and data['type_operation'] == 'frais' else 'cash',
@@ -363,7 +366,7 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                     'cursor-pointer'
                 )
 
-        montant_input = ui.number('Montant (€)',  # (MODIFIÉ) Label générique pour les flux, y compris frais cash
+        montant_input = ui.number('Montant (€)',
                                   value=data['montant'],
                                   format='%.2f', min=0).classes('w-full')
         dividend_per_share_input = ui.number('Dividende par part (€)',
@@ -373,7 +376,6 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                                          value=0.0,
                                          format='%.4f', min=0, step=0.01).classes('w-full')
 
-        # (NOUVEAU AMÉLIORATION) Champs pour les frais en parts
         current_fees_parts_qty_label = ui.label("Quantité actuelle : 0.0 parts").classes('text-sm text-gray-500')
         fees_parts_to_deduct_input = ui.number('Quantité de parts à prélever *', value=0.0,
                                                format='%.4f', min=0, step=0.01).classes('w-full')
@@ -383,7 +385,7 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
         libelle_input = ui.input('Libellé (optionnel)', value=data['libelle']) \
             .classes('w-full')
 
-        frais_input = ui.number(  # Champ pour les frais associés aux Achat/Vente, devrait être toujours caché ici
+        frais_input = ui.number(
             '⚠️ Frais associés (€)', value=frais_existants,
             format='%.2f', min=0
         ).classes('w-full')
@@ -392,7 +394,6 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
             f'background-color: {c["card_border"]}; color: {c["text_secondary"]};'
         )
 
-        # (NOUVEAU AMÉLIORATION) Fonction pour gérer les calculs des frais en parts
         def update_fees_parts_amounts(source_input):
             if type_input.value != 'frais' or fee_type_toggle.value != 'parts':
                 return
@@ -416,13 +417,13 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                     deduct_val = float(fees_parts_to_deduct_input.value or 0)
                     final_val = current_qty - deduct_val
                     last_fees_parts_input_changed['value'] = 'final_qty'
-                    fees_final_parts_qty_input.value = round(max(0.0, final_val), 4)  # Ne pas descendre en dessous de 0
+                    fees_final_parts_qty_input.value = round(max(0.0, final_val), 4)
                 elif source_input == 'final_qty':
                     final_val = float(fees_final_parts_qty_input.value or 0)
                     deduct_val = current_qty - final_val
                     last_fees_parts_input_changed['value'] = 'deduct_qty'
                     fees_parts_to_deduct_input.value = round(max(0.0, deduct_val), 4)
-            else:  # Quantité actuelle est 0
+            else:
                 fees_parts_to_deduct_input.value = 0.0
                 fees_final_parts_qty_input.value = 0.0
 
@@ -440,7 +441,7 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                 return
 
             selected_id = dividend_source_select.value
-            current_qty = chargeable_positions_options.get(selected_id, {}).get('quantite', 0)  # (MODIFIÉ)
+            current_qty = chargeable_positions_options.get(selected_id, {}).get('quantite', 0)
 
             if current_qty > 0:
                 if source_input == 'total':
@@ -473,7 +474,7 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                 libelle_input.props(f'placeholder="ex: Intérêts annuels {current_date_year}"')
             elif current_type == 'dividende':
                 selected_id = dividend_source_select.value if dividend_source_select else None
-                source_name = chargeable_positions_options.get(selected_id, {}).get('nom', 'Actif')  # (MODIFIÉ)
+                source_name = chargeable_positions_options.get(selected_id, {}).get('nom', 'Actif')
                 if reinvest_checkbox.value:
                     libelle_input.props(f'placeholder="ex: Dividende réinvesti {source_name}"')
                 else:
@@ -482,32 +483,28 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                 if not reinvest_checkbox.value:
                     update_dividend_amounts('total')
             elif current_type == 'frais':
-                selected_id = fees_asset_select.value if fees_asset_select else None  # (NOUVEAU AMÉLIORATION)
-                source_name = chargeable_positions_options.get(selected_id, {}).get('nom',
-                                                                                    'Actif')  # (NOUVEAU AMÉLIORATION)
-                if fee_type_toggle.value == 'parts':  # (NOUVEAU AMÉLIORATION)
+                selected_id = fees_asset_select.value if fees_asset_select else None
+                source_name = chargeable_positions_options.get(selected_id, {}).get('nom', 'Actif')
+                if fee_type_toggle.value == 'parts':
                     libelle_input.props(f'placeholder="ex: Frais de gestion - {source_name} (parts)"')
-                    update_fees_parts_amounts('deduct_qty')  # (NOUVEAU AMÉLIORATION)
+                    update_fees_parts_amounts('deduct_qty')
                 else:
                     libelle_input.props('placeholder="ex: Frais de gestion annuels"')
             else:
                 libelle_input.props('')
 
-            # Remplissage automatique du libellé si vide et type de transaction spécifique
             if not libelle_input.value or \
                     (current_type == 'interets' and libelle_input.value.startswith("Intérêts annuels")) or \
                     (current_type == 'dividende' and libelle_input.value.startswith("Dividende -")) or \
-                    (current_type == 'frais' and libelle_input.value.startswith(
-                        "Frais de gestion -")):  # (NOUVEAU AMÉLIORATION)
+                    (current_type == 'frais' and libelle_input.value.startswith("Frais de gestion -")):
                 if current_type == 'interets':
                     libelle_input.value = f"Intérêts annuels {current_date_year}" if current_date_year else ""
                 elif current_type == 'dividende' and dividend_source_select and dividend_source_select.value:
-                    source_name = chargeable_positions_options[dividend_source_select.value]['nom']  # (MODIFIÉ)
+                    source_name = chargeable_positions_options[dividend_source_select.value]['nom']
                     if reinvest_checkbox.value:
                         libelle_input.value = f"Dividende réinvesti - {source_name}"
                     else:
                         libelle_input.value = f"Dividende - {source_name}"
-                # (NOUVEAU AMÉLIORATION) Remplir le libellé pour les frais
                 elif current_type == 'frais':
                     selected_id = fees_asset_select.value if fees_asset_select else None
                     source_name = chargeable_positions_options.get(selected_id, {}).get('nom', 'Actif')
@@ -516,24 +513,22 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                     else:
                         libelle_input.value = f"Frais de gestion {current_date_year}" if current_date_year else "Frais de gestion"
 
-            # Nettoyer le libellé pour les autres types si on a une valeur auto-générée qui ne correspond plus
             if current_type not in ('interets', 'dividende', 'frais') and \
                     libelle_input.value.startswith(
-                        ("Intérêts annuels", "Dividende -", "Frais de gestion -")):  # (MODIFIÉ)
+                        ("Intérêts annuels", "Dividende -", "Frais de gestion -")):
                 libelle_input.value = ''
 
         def update_visibility():
             val = type_input.value
 
             is_reinvesting_dividend = reinvest_checkbox.value and val == 'dividende'
-            is_fees_in_parts = val == 'frais' and fee_type_toggle.value == 'parts'  # (NOUVEAU AMÉLIORATION)
+            is_fees_in_parts = val == 'frais' and fee_type_toggle.value == 'parts'
 
-            target_str = "du Fonds € sélectionné" if is_av_per and not is_reinvesting_dividend and not is_fees_in_parts else 'de la position "Cash"'  # (MODIFIÉ)
+            target_str = "du Fonds € sélectionné" if is_av_per and not is_reinvesting_dividend and not is_fees_in_parts else 'de la position "Cash"'
 
-            # (MODIFIÉ) Messages d'info plus précis pour les frais
             if is_reinvesting_dividend:
                 info_label.text = f'🎁 Le dividende sera réinvesti en parts de l\'actif. Pas d\'impact sur le solde {target_str}.'
-            elif is_fees_in_parts:  # (NOUVEAU AMÉLIORATION)
+            elif is_fees_in_parts:
                 info_label.text = f'⚠️ Les frais seront prélevés en parts de l\'actif sélectionné. Pas d\'impact sur le solde {target_str}.'
             else:
                 messages = {
@@ -549,43 +544,35 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
 
             is_visible_for_flux = val not in ('achat', 'vente')
 
-            # Gérer la visibilité de chaque élément
             date_input_ui_element.set_visibility(is_visible_for_flux)
             libelle_input.set_visibility(is_visible_for_flux)
-            frais_input.set_visibility(
-                False)  # Ce champ est pour les frais liés à achat/vente, pas pour le type 'frais' autonome
+            frais_input.set_visibility(False)
 
-            # (MODIFIÉ) Visibilité des champs spécifiques au DIVIDENDE
             if val == 'dividende':
                 if dividend_source_select: dividend_source_select.set_visibility(True)
-                # (REVERT) no_dividend_sources_label devient no_chargeable_assets_label
                 if no_chargeable_assets_label: no_chargeable_assets_label.set_visibility(
-                    not chargeable_positions_options and not is_av_per)  # (MODIFIÉ)
+                    not chargeable_positions_options and not is_av_per)
                 reinvest_checkbox.set_visibility(True)
 
                 montant_input.set_visibility(not is_reinvesting_dividend)
                 dividend_per_share_input.set_visibility(not is_reinvesting_dividend)
                 dividend_parts_input.set_visibility(is_reinvesting_dividend)
 
-                if fees_asset_select: fees_asset_select.set_visibility(False)  # (NOUVEAU AMÉLIORATION)
-                fee_type_toggle.set_visibility(False)  # (NOUVEAU AMÉLIORATION)
-                current_fees_parts_qty_label.set_visibility(False)  # (NOUVEAU AMÉLIORATION)
-                fees_parts_to_deduct_input.set_visibility(False)  # (NOUVEAU AMÉLIORATION)
-                fees_final_parts_qty_input.set_visibility(False)  # (NOUVEAU AMÉLIORATION)
+                if fees_asset_select: fees_asset_select.set_visibility(False)
+                fee_type_toggle.set_visibility(False)
+                current_fees_parts_qty_label.set_visibility(False)
+                fees_parts_to_deduct_input.set_visibility(False)
+                fees_final_parts_qty_input.set_visibility(False)
 
-
-            # (NOUVEAU AMÉLIORATION) Visibilité des champs spécifiques aux FRAIS
             elif val == 'frais':
-                # Masquer les champs dividende
                 if dividend_source_select: dividend_source_select.set_visibility(False)
                 reinvest_checkbox.set_visibility(False)
                 dividend_per_share_input.set_visibility(False)
                 dividend_parts_input.set_visibility(False)
 
-                # Afficher les champs frais
                 fee_type_toggle.set_visibility(True)
                 if no_chargeable_assets_label: no_chargeable_assets_label.set_visibility(
-                    not chargeable_positions_options and fee_type_toggle.value == 'parts')  # (MODIFIÉ)
+                    not chargeable_positions_options and fee_type_toggle.value == 'parts')
 
                 if fee_type_toggle.value == 'cash':
                     montant_input.set_visibility(True)
@@ -593,35 +580,32 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                     current_fees_parts_qty_label.set_visibility(False)
                     fees_parts_to_deduct_input.set_visibility(False)
                     fees_final_parts_qty_input.set_visibility(False)
-                else:  # frais en parts
+                else:
                     montant_input.set_visibility(False)
                     if fees_asset_select: fees_asset_select.set_visibility(True)
                     current_fees_parts_qty_label.set_visibility(True)
                     fees_parts_to_deduct_input.set_visibility(True)
                     fees_final_parts_qty_input.set_visibility(True)
 
-            # (MODIFIÉ) Pour les autres types de flux (versement, retrait, interets)
             else:
                 if dividend_source_select: dividend_source_select.set_visibility(False)
-                if fees_asset_select: fees_asset_select.set_visibility(False)  # (NOUVEAU AMÉLIORATION)
-                if no_chargeable_assets_label: no_chargeable_assets_label.set_visibility(False)  # (MODIFIÉ)
+                if fees_asset_select: fees_asset_select.set_visibility(False)
+                if no_chargeable_assets_label: no_chargeable_assets_label.set_visibility(False)
                 reinvest_checkbox.set_visibility(False)
-                fee_type_toggle.set_visibility(False)  # (NOUVEAU AMÉLIORATION)
+                fee_type_toggle.set_visibility(False)
                 montant_input.set_visibility(is_visible_for_flux)
                 dividend_per_share_input.set_visibility(False)
                 dividend_parts_input.set_visibility(False)
-                current_fees_parts_qty_label.set_visibility(False)  # (NOUVEAU AMÉLIORATION)
-                fees_parts_to_deduct_input.set_visibility(False)  # (NOUVEAU AMÉLIORATION)
-                fees_final_parts_qty_input.set_visibility(False)  # (NOUVEAU AMÉLIORATION)
+                current_fees_parts_qty_label.set_visibility(False)
+                fees_parts_to_deduct_input.set_visibility(False)
+                fees_final_parts_qty_input.set_visibility(False)
 
             if is_av_per and fonds_euro_select:
                 fonds_euro_select.set_visibility(val in ('versement', 'retrait', 'interets') or \
                                                  (val == 'dividende' and not is_reinvesting_dividend) or \
-                                                 (val == 'frais' and not is_fees_in_parts))  # (MODIFIÉ)
+                                                 (val == 'frais' and not is_fees_in_parts))
 
             update_dynamic_fields()
-
-            # --- CONFIGURATION DES ÉCOUTEURS D'ÉVÉNEMENTS APRÈS LA CRÉATION ET LA LOGIQUE DE VISIBILITÉ INITIALE ---
 
         type_input.on('update:model-value', update_visibility)
         if dividend_source_select:
@@ -632,11 +616,10 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
 
         reinvest_checkbox.on('update:model-value', update_visibility)
 
-        # (NOUVEAU AMÉLIORATION) Écouteurs pour le toggle de frais et les champs de parts
         fee_type_toggle.on('update:model-value', update_visibility)
         if fees_asset_select:
             fees_asset_select.on('update:model-value', lambda: update_fees_parts_amounts('deduct_qty'))
-            fees_asset_select.on('update:model-value', update_dynamic_fields)  # Pour le libellé auto
+            fees_asset_select.on('update:model-value', update_dynamic_fields)
         fees_parts_to_deduct_input.on('update:model-value', lambda: update_fees_parts_amounts('deduct_qty'))
         fees_final_parts_qty_input.on('update:model-value', lambda: update_fees_parts_amounts('final_qty'))
 
@@ -657,13 +640,11 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
 
                 type_val = type_input.value
                 is_reinvesting_current_state = reinvest_checkbox.value and type_val == 'dividende'
-                is_fees_in_parts_current_state = fee_type_toggle.value == 'parts' and type_val == 'frais'  # (NOUVEAU AMÉLIORATION)
+                is_fees_in_parts_current_state = fee_type_toggle.value == 'parts' and type_val == 'frais'
 
-                # Récupération des valeurs des champs
-                montant_val_for_tx = float(montant_input.value or 0)  # Montant principal pour cash/autres
-                parts_reinvesties = float(dividend_parts_input.value or 0)  # Pour dividende C
-                parts_a_prelever_frais = float(
-                    fees_parts_to_deduct_input.value or 0)  # (NOUVEAU AMÉLIORATION) Pour frais en parts
+                montant_val_for_tx = float(montant_input.value or 0)
+                parts_reinvesties = float(dividend_parts_input.value or 0)
+                parts_a_prelever_frais = float(fees_parts_to_deduct_input.value or 0)
 
                 # --- VALIDATIONS ---
                 if type_val == 'dividende':
@@ -675,7 +656,7 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                         if not parts_reinvesties or parts_reinvesties <= 0:
                             ui.notify("Le nombre de parts réinvesties doit être supérieur à zéro.", type='negative')
                             return
-                    else:  # Mode dividende cash
+                    else:
                         if not montant_val_for_tx or montant_val_for_tx <= 0:
                             ui.notify("Le montant total du dividende doit être positif.", type='negative')
                             return
@@ -683,7 +664,6 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                             ui.notify("Veuillez sélectionner un Fonds € cible.", type='negative')
                             return
 
-                # (NOUVEAU AMÉLIORATION) Validations spécifiques aux frais
                 elif type_val == 'frais':
                     if is_fees_in_parts_current_state:
                         if not fees_asset_select or not fees_asset_select.value:
@@ -692,14 +672,13 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                         if not parts_a_prelever_frais or parts_a_prelever_frais <= 0:
                             ui.notify("La quantité de parts à prélever doit être supérieure à zéro.", type='negative')
                             return
-                        # Vérifier la quantité disponible
                         selected_asset_qty = chargeable_positions_options.get(fees_asset_select.value, {}).get(
                             'quantite', 0)
                         if parts_a_prelever_frais > selected_asset_qty:
                             ui.notify(f"Quantité de parts insuffisante. Disponible: {selected_asset_qty:g}",
                                       type='negative')
                             return
-                    else:  # Frais en euros
+                    else:
                         if not montant_val_for_tx or montant_val_for_tx <= 0:
                             ui.notify("Le montant des frais doit être positif.", type='negative')
                             return
@@ -708,7 +687,6 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                                       type='negative')
                             return
 
-                # Autres types de transactions (versement, retrait, interets)
                 else:
                     if not montant_val_for_tx or montant_val_for_tx <= 0:
                         ui.notify("Le montant doit être positif.", type='negative')
@@ -717,7 +695,9 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                         ui.notify("Veuillez sélectionner un Fonds € cible.", type='negative')
                         return
 
-                # --- DÉBUT DE LA LOGIQUE DE SAUVEGARDE EN BDD ---
+                # 🆕 Variables qui seront remplies dans la session, et utilisées hors session pour le backfill
+                has_ticker = False
+
                 with get_session() as session:
                     def update_fonds_euro(fe_id, type_op, montant):
                         fe = session.get(Position, fe_id)
@@ -736,14 +716,12 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                         )
                         return
 
-                    # --- CRÉATION D'UNE NOUVELLE TRANSACTION (mode `is_edit=False`) ---
                     libelle = libelle_input.value
                     if not libelle:
                         if type_val == 'interets':
                             libelle = f"Intérêts annuels {date_val.year}"
                         elif type_val == 'dividende':
-                            selected_source_name = chargeable_positions_options.get(dividend_source_select.value)[
-                                'nom']  # (MODIFIÉ)
+                            selected_source_name = chargeable_positions_options.get(dividend_source_select.value)['nom']
                             libelle = f"Dividende réinvesti - {selected_source_name}" if is_reinvesting_current_state else f"Dividende - {selected_source_name}"
                         elif type_val == 'versement':
                             libelle = 'Versement'
@@ -751,10 +729,10 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                             libelle = 'Retrait'
                         elif type_val == 'frais':
                             selected_source_name = chargeable_positions_options.get(fees_asset_select.value)[
-                                'nom'] if fees_asset_select and fees_asset_select.value else 'Génériques'  # (NOUVEAU AMÉLIORATION)
+                                'nom'] if fees_asset_select and fees_asset_select.value else 'Génériques'
                             libelle = f"Frais de gestion - {selected_source_name} (parts)" if is_fees_in_parts_current_state else f"Frais de gestion {date_val.year}"
 
-                    t_final = None  # Initialiser pour pouvoir l'utiliser après les if/else
+                    t_final = None
 
                     if type_val == 'dividende':
                         source_pos_for_tx = session.get(Position, dividend_source_select.value)
@@ -796,7 +774,7 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                             )
                             session.add(t_final)
 
-                        else:  # Dividende payé en cash
+                        else:
                             t_final = Transaction(
                                 portefeuille_id=portefeuille_id,
                                 date_operation=date_val,
@@ -818,7 +796,6 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                             else:
                                 ajuster_cash(session, portefeuille_id, impact_cash(type_val, montant_val_for_tx))
 
-                    # (NOUVEAU AMÉLIORATION) Logique de création pour les frais
                     elif type_val == 'frais':
                         if is_fees_in_parts_current_state:
                             source_pos_for_fees = session.get(Position, fees_asset_select.value)
@@ -830,53 +807,48 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                                 session.rollback()
                                 return
 
-                            # Valeur monétaire des parts prélevées
                             montant_frais_final = parts_a_prelever_frais * price_at_deduction
 
-                            # Réduire la quantité de la position. Le PRU reste inchangé.
                             source_pos_for_fees.quantite -= parts_a_prelever_frais
 
                             t_final = Transaction(
                                 portefeuille_id=portefeuille_id,
                                 date_operation=date_val,
                                 type_operation='frais',
-                                montant=montant_frais_final,  # Valeur monétaire des frais en parts
+                                montant=montant_frais_final,
                                 libelle=libelle,
                                 nom_titre=source_pos_for_fees.nom,
                                 ticker=source_pos_for_fees.ticker,
                                 code=source_pos_for_fees.code,
                                 categorie=source_pos_for_fees.categorie,
-                                quantite=parts_a_prelever_frais,  # Quantité de parts prélevées
-                                prix_unitaire=price_at_deduction,  # Prix des parts au moment du prélèvement
+                                quantite=parts_a_prelever_frais,
+                                prix_unitaire=price_at_deduction,
                             )
                             session.add(t_final)
-                        else:  # Frais en euros (comportement par défaut)
+                        else:
                             t_final = Transaction(
                                 portefeuille_id=portefeuille_id,
                                 date_operation=date_val,
                                 type_operation='frais',
                                 montant=montant_val_for_tx,
                                 libelle=libelle,
-                                # Si c'est AV/PER et que le prélèvement est sur un Fonds €, on le trace
                                 nom_titre=fonds_euros_dict.get(fonds_euro_select.value) if (
                                             is_av_per and fonds_euro_select and fonds_euro_select.value) else None,
                                 categorie='Fonds Euro' if (
                                             is_av_per and fonds_euro_select and fonds_euro_select.value) else None,
                                 quantite=montant_val_for_tx if (
                                             is_av_per and fonds_euro_select and fonds_euro_select.value) else None,
-                                # La quantité est le montant pour un Fonds Euro
                                 prix_unitaire=1.0 if (
                                             is_av_per and fonds_euro_select and fonds_euro_select.value) else None,
                             )
                             session.add(t_final)
-                            session.flush()  # Nécessaire pour les impacts cash/fonds euro
+                            session.flush()
 
                             if is_av_per:
                                 update_fonds_euro(fonds_euro_select.value, type_val, montant_val_for_tx)
                             else:
                                 ajuster_cash(session, portefeuille_id, impact_cash(type_val, montant_val_for_tx))
 
-                    # Autres types de transactions (versement, retrait, interets)
                     else:
                         t_final = Transaction(
                             portefeuille_id=portefeuille_id,
@@ -900,7 +872,25 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                         else:
                             ajuster_cash(session, portefeuille_id, impact_cash(type_val, montant_val_for_tx))
 
+                    # 🆕 Détection has_ticker AVANT le commit, en utilisant la session courante
+                    if t_final is not None:
+                        if t_final.ticker:
+                            has_ticker = True
+                        elif (t_final.nom_titre and
+                              t_final.categorie not in ('Fonds Euro', 'Fonds €', 'Cash')):
+                            check_pos = session.execute(
+                                select(Position).where(
+                                    Position.portefeuille_id == portefeuille_id,
+                                    Position.nom == t_final.nom_titre,
+                                )
+                            ).scalar_one_or_none()
+                            if check_pos and check_pos.ticker:
+                                has_ticker = True
+
                     session.commit()
+
+                # 🆕 Backfill HORS du with → la session est garantie fermée
+                _trigger_backfill_if_needed(portefeuille_id, has_ticker)
 
                 ui.notify('Transaction ajoutée', type='positive')
                 dialog.close()
@@ -937,6 +927,10 @@ def _confirm_delete_transaction(transaction_id, libelle, refresh):
             .style('color: #f59e0b')
 
         def do_delete():
+            # 🆕 Variables remplies dans la session pour usage hors session
+            has_ticker = False
+            ptf_id_for_backfill = None
+
             with get_session() as session:
                 t = session.get(Transaction, transaction_id)
                 if not t:
@@ -951,7 +945,6 @@ def _confirm_delete_transaction(transaction_id, libelle, refresh):
                 # CAS 1 : ACHAT (potentiellement parent d'arbitrage)
                 # ═══════════════════════════════════════════════════════════
                 if t.type_operation == 'achat':
-                    # Restaurer/diminuer la position du titre acheté
                     if t.quantite and t.nom_titre:
                         bought_pos = session.execute(
                             select(Position).where(
@@ -965,7 +958,6 @@ def _confirm_delete_transaction(transaction_id, libelle, refresh):
                             if new_qty <= 0.0001:
                                 session.delete(bought_pos)
                             else:
-                                # Recalcul du PRU (annulation de l'achat dans la moyenne)
                                 old_qty = bought_pos.quantite or 0
                                 old_pru = bought_pos.prix_moyen or 0
                                 old_invest = old_qty * old_pru
@@ -974,10 +966,8 @@ def _confirm_delete_transaction(transaction_id, libelle, refresh):
                                 bought_pos.quantite = new_qty
                                 bought_pos.prix_moyen = new_invest / new_qty if new_qty > 0 else 0
 
-                    # Traiter les enfants (arbitrage vente Fonds € + frais éventuels)
                     for child in list(t.children):
                         if child.type_operation == 'vente' and is_av_per_for_tx:
-                            # 🛡️ Arbitrage vente Fonds € → réinjecter la quantité au Fonds €
                             if child.nom_titre and child.quantite:
                                 fe_pos = session.execute(
                                     select(Position).where(
@@ -989,9 +979,7 @@ def _confirm_delete_transaction(transaction_id, libelle, refresh):
                                 if fe_pos:
                                     fe_pos.quantite += child.quantite
                         elif child.type_operation == 'frais':
-                            # Annuler l'impact des frais
                             if is_av_per_for_tx:
-                                # Frais en parts ou frais sur Fonds €
                                 if child.nom_titre and child.quantite:
                                     charged_pos = session.execute(
                                         select(Position).where(
@@ -1002,12 +990,10 @@ def _confirm_delete_transaction(transaction_id, libelle, refresh):
                                     if charged_pos:
                                         charged_pos.quantite += child.quantite
                             else:
-                                # Frais sur cash (PEA/CTO)
                                 impact_inv = -impact_cash(child.type_operation, child.montant)
                                 ajuster_cash(session, child.portefeuille_id, impact_inv)
                         session.delete(child)
 
-                    # Pour PEA/CTO (pas AV/PER) : restaurer le cash débité par l'achat
                     if not is_av_per_for_tx:
                         impact_inv = -impact_cash('achat', t.montant)
                         ajuster_cash(session, t.portefeuille_id, impact_inv)
@@ -1016,7 +1002,6 @@ def _confirm_delete_transaction(transaction_id, libelle, refresh):
                 # CAS 2 : VENTE (potentiellement parent d'arbitrage)
                 # ═══════════════════════════════════════════════════════════
                 elif t.type_operation == 'vente':
-                    # Restaurer la position du titre vendu
                     if t.quantite and t.nom_titre and t.prix_unitaire:
                         sold_pos = session.execute(
                             select(Position).where(
@@ -1026,11 +1011,8 @@ def _confirm_delete_transaction(transaction_id, libelle, refresh):
                         ).scalar_one_or_none()
 
                         if sold_pos:
-                            # Position existe encore (vente partielle) → on rajoute la quantité
-                            # ⚠️ PRU non recalculé côté restauration (la vente n'avait pas changé le PRU)
                             sold_pos.quantite += t.quantite
                         else:
-                            # Position avait été supprimée (vente totale) → on la recrée
                             new_pos = Position(
                                 portefeuille_id=t.portefeuille_id,
                                 nom=t.nom_titre,
@@ -1043,10 +1025,8 @@ def _confirm_delete_transaction(transaction_id, libelle, refresh):
                             )
                             session.add(new_pos)
 
-                    # Traiter les enfants
                     for child in list(t.children):
                         if child.type_operation == 'versement' and is_av_per_for_tx:
-                            # 🛡️ Arbitrage versement vers Fonds € → reprélever la quantité
                             if child.nom_titre and child.quantite:
                                 fe_pos = session.execute(
                                     select(Position).where(
@@ -1073,7 +1053,6 @@ def _confirm_delete_transaction(transaction_id, libelle, refresh):
                                 ajuster_cash(session, child.portefeuille_id, impact_inv)
                         session.delete(child)
 
-                    # Pour PEA/CTO : reprélever le cash crédité par la vente
                     if not is_av_per_for_tx:
                         impact_inv = -impact_cash('vente', t.montant)
                         ajuster_cash(session, t.portefeuille_id, impact_inv)
@@ -1101,7 +1080,7 @@ def _confirm_delete_transaction(transaction_id, libelle, refresh):
                         else:
                             new_qty = old_qty - parts_a_retirer
                             new_pru = ((old_qty * old_pru) - (
-                                        parts_a_retirer * t.prix_unitaire)) / new_qty if new_qty > 0 else 0
+                                    parts_a_retirer * t.prix_unitaire)) / new_qty if new_qty > 0 else 0
                             source_pos.quantite = new_qty
                             source_pos.prix_moyen = new_pru
 
@@ -1137,7 +1116,6 @@ def _confirm_delete_transaction(transaction_id, libelle, refresh):
                         elif t.type_operation in ('retrait', 'frais'):
                             fe_pos.quantite += t.montant
 
-                    # Traiter les enfants (frais associés)
                     for child in list(t.children):
                         if child.type_operation == 'frais' and fe_pos:
                             fe_pos.quantite += child.montant
@@ -1147,24 +1125,41 @@ def _confirm_delete_transaction(transaction_id, libelle, refresh):
                 # CAS 6 : FLUX CASH (PEA/CTO uniquement)
                 # ═══════════════════════════════════════════════════════════
                 else:
-                    # Annuler les enfants (frais)
                     for child in list(t.children):
                         if child.type_operation == 'frais':
                             impact_inv = -impact_cash(child.type_operation, child.montant)
                             ajuster_cash(session, child.portefeuille_id, impact_inv)
                         session.delete(child)
 
-                    # Annuler la transaction principale sur le cash
                     if not is_av_per_for_tx:
                         impact_inverse = -impact_cash(t.type_operation, t.montant)
                         ajuster_cash(session, t.portefeuille_id, impact_inverse)
 
+                # 🆕 Détection has_ticker AVANT delete + commit, en utilisant la session courante
+                has_ticker = bool(t.ticker)
+                if not has_ticker and t.nom_titre and t.categorie not in ('Fonds Euro', 'Fonds €', 'Cash'):
+                    check_pos = session.execute(
+                        select(Position).where(
+                            Position.portefeuille_id == t.portefeuille_id,
+                            Position.nom == t.nom_titre,
+                        )
+                    ).scalar_one_or_none()
+                    if check_pos and check_pos.ticker:
+                        has_ticker = True
+
+                ptf_id_for_backfill = t.portefeuille_id
+
                 session.delete(t)
                 session.commit()
+
+            # 🆕 Backfill HORS du with get_session() pour éviter les locks SQLite
+            if ptf_id_for_backfill is not None:
+                _trigger_backfill_if_needed(ptf_id_for_backfill, has_ticker)
 
             ui.notify(f'"{libelle}" supprimée', type='warning')
             dialog.close()
             refresh()
+
         with ui.row().classes('w-full justify-end gap-2'):
             ui.button('Annuler', on_click=dialog.close).props('flat')
             ui.button('Supprimer', on_click=do_delete).props('unelevated') \

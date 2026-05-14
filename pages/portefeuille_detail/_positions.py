@@ -6,9 +6,13 @@ from database.db import get_session
 from database.models import Position
 from utils.formatters import format_money, format_percent, get_perf_color
 from pages.positions_data import CATEGORIES_POSITION, get_categorie_info
+# 🆕 Import du module relevé annuel
+from pages.portefeuille_detail._releve_annuel import (
+    get_available_years, show_releve_annuel
+)
 
 
-def render_positions_section(positions, data, c, portefeuille_id, refresh):
+def render_positions_section(positions, data, c, portefeuille_id, refresh, is_dark=False):
     with ui.card().classes('w-full p-0 rounded-xl overflow-hidden').style(
         f'background-color: {c["card_bg"]}; '
         f'border: 1px solid {c["card_border"]};'
@@ -23,6 +27,34 @@ def render_positions_section(positions, data, c, portefeuille_id, refresh):
                 )
                 ui.label(f'{len(positions)} ligne(s) dans le portefeuille').classes('text-xs') \
                     .style(f'color: {c["text_secondary"]}')
+
+            # 🆕 Menu déroulant "Relevé annuel" à droite du header
+            available_years = get_available_years(portefeuille_id)
+            if available_years:
+                with ui.button(icon='description').props(
+                        'flat dense'
+                ).style(f'color: {c["text_secondary"]};') \
+                        .tooltip("Relevé d'information annuel"):
+                    with ui.menu():
+                        # En-tête du menu (non-cliquable)
+                        with ui.row().classes('items-center gap-2 px-3 py-2').style(
+                                'pointer-events: none;'
+                        ):
+                            ui.icon('event_note').classes('text-sm').style(
+                                f'color: {c["text_secondary"]}'
+                            )
+                            ui.label("Relevé d'information annuel").classes(
+                                'text-xs font-bold tracking-wider'
+                            ).style(f'color: {c["text_secondary"]};')
+                        ui.separator()
+                        # Liste des années
+                        for year in available_years:
+                            ui.menu_item(
+                                f'📋 Année {year}',
+                                on_click=lambda y=year: show_releve_annuel(
+                                    portefeuille_id, y, c, is_dark
+                                )
+                            )
 
         if not positions:
             with ui.column().classes('w-full items-center py-10 gap-2'):
@@ -83,6 +115,7 @@ def render_positions_section(positions, data, c, portefeuille_id, refresh):
 
         # Footer total
         _render_positions_footer(total_pru, total_valo, total_pv, c)
+
 
 def _render_position_row(pos, c, portefeuille_id, refresh):
     cat_info = get_categorie_info(pos['categorie'])
@@ -147,7 +180,7 @@ def _render_position_row(pos, c, portefeuille_id, refresh):
                     f'color: {c["text_secondary"]};'
                 )
             else:
-                ui.label(format_money(pos['plus_value'], decimals=2)).classes(  # ← decimals=2
+                ui.label(format_money(pos['plus_value'], decimals=2)).classes(
                     'text-sm font-semibold'
                 ).style(f'color: {pv_color};')
                 ui.label(format_percent(pos['plus_value_pct'])).classes(
@@ -179,7 +212,6 @@ def _render_positions_footer(total_pru, total_valo, total_pv, c):
         ui.label('').style('width: 110px;')
         ui.label('').style('width: 90px;')
         ui.label('').style('width: 100px;')
-        # Footer total
         ui.label(format_money(total_pru, decimals=2)).classes('text-sm').style(
             f'color: {c["text_secondary"]}; width: 100px; text-align: right;'
         )

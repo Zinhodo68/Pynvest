@@ -582,13 +582,12 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                 ).style(f'color: {c["text_secondary"]}')
 
                 with ui.row().classes('w-full gap-3'):
-                    is_action = t.get('type') == 'Action'
-                    qte_format = '%g' if is_action else '%.4f'
-                    qte_step = 1 if is_action else 0.0001
-
+                    # 🆕 Toutes les catégories autorisent des fractions (actions fractionnées,
+                    # ETF, OPCVM, etc.). Format à 4 décimales avec step fin.
+                    is_action = False  # Conservé pour compatibilité downstream
                     quantite_input = ui.number(
                         '🔢 Quantité', value=0,
-                        format=qte_format, min=0, step=qte_step
+                        format='%.4f', min=0, step=0.0001
                     ).classes('flex-1')
 
                     montant_input = ui.number(
@@ -610,14 +609,14 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                         pass
 
                 def update_qte_from_montant():
+                    """Recalcule la quantité depuis montant ÷ prix (toujours fractionnaire)."""
                     if updating['value']:
                         return
                     try:
                         m = float(montant_input.value or 0)
                         p = float(prix_input.value or 0)
                         if p > 0:
-                            new_qte = m / p
-                            new_qte = int(new_qte) if is_action else round(new_qte, 4)
+                            new_qte = round(m / p, 4)
                             updating['value'] = True
                             quantite_input.value = new_qte
                             updating['value'] = False
@@ -642,12 +641,15 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                 )
 
                 def update_summary():
+                    """Affiche le récap en recalculant TOUJOURS depuis quantité × prix."""
                     try:
                         q = float(quantite_input.value or 0)
-                        m = float(montant_input.value or 0)
                         p = float(prix_input.value or 0)
                         f = float(frais_input.value or 0)
                         cur = t.get('currency', 'EUR')
+
+                        # 🆕 Toujours recalculer m depuis q × p
+                        m = round(q * p, 2)
 
                         if cur != 'EUR':
                             summary_label.text = (
@@ -702,12 +704,7 @@ def open_buy_dialog(portefeuille_id, c, refresh):
 
                         q = float(quantite_input.value)
                         p_unit = float(prix_input.value)
-                        if is_action and q != int(q):
-                            ui.notify(
-                                'Quantité entière requise pour une action',
-                                type='negative'
-                            )
-                            return
+                        # 🆕 Plus de contrainte d'entier : actions fractionnées autorisées
 
                         frais = float(frais_input.value or 0)
 
@@ -850,6 +847,15 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                                                  impact_cash('frais', frais))
 
                             session.commit()
+
+                        # 🆕 Backfill des cours historiques pour ce ticker
+                        if t.get('source') == 'yahoo' and t.get('symbol'):
+                            from services.backfill import backfill_cours_historique, backfill_valorisations
+                            try:
+                                backfill_cours_historique(portefeuille_id)
+                                backfill_valorisations(portefeuille_id)
+                            except Exception as e:
+                                print(f'⚠️ Backfill échoué après achat: {e}')
 
                         ui.notify(
                             f'✅ Achat de {q:g} × {t["name"][:30]} effectué',

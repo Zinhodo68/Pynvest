@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, declarative_base
 from pathlib import Path
 
@@ -9,7 +9,32 @@ DATABASE_URL = f'sqlite:///{DB_PATH}'
 # Pour migrer plus tard vers Supabase, tu remplaces juste cette ligne par :
 # DATABASE_URL = 'postgresql://user:pass@host:5432/dbname'
 
-engine = create_engine(DATABASE_URL, echo=False, connect_args={'check_same_thread': False})
+engine = create_engine(
+    DATABASE_URL,
+    echo=False,
+    connect_args={
+        'check_same_thread': False,
+        'timeout': 30,  # 🆕 Attendre jusqu'à 30s avant de lever 'database is locked'
+    },
+)
+
+
+# 🆕 Activer le mode WAL (Write-Ahead Logging) pour SQLite
+# Avantages :
+#   - Plusieurs lecteurs + 1 écrivain peuvent travailler en parallèle
+#   - Évite la majorité des erreurs "database is locked"
+#   - Recommandé pour les apps mono-utilisateur avec beaucoup d'I/O
+@event.listens_for(engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    """Active WAL et optimise SQLite à chaque nouvelle connexion."""
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")        # mode Write-Ahead Logging
+    cursor.execute("PRAGMA synchronous=NORMAL")      # bon compromis perf/sécurité
+    cursor.execute("PRAGMA busy_timeout=30000")      # 30s d'attente avant erreur
+    cursor.execute("PRAGMA foreign_keys=ON")         # contrôle d'intégrité référentielle
+    cursor.close()
+
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 
@@ -24,6 +49,7 @@ def init_db():
     from database import models  # important : charge tous les modèles
     Base.metadata.create_all(bind=engine)  # ne recrée pas si la table existe déjà
 
+
 def get_all_membres():
     """Retourne tous les membres sous forme de dictionnaires."""
     from database.models import Membre
@@ -31,6 +57,7 @@ def get_all_membres():
     with get_session() as session:
         membres = session.execute(select(Membre).order_by(Membre.id)).scalars().all()
         return [m.to_dict() for m in membres]
+
 
 def get_all_portefeuilles():
     """Retourne tous les portefeuilles avec infos du propriétaire."""

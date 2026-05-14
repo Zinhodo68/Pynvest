@@ -1,10 +1,13 @@
-"""Graphique d'évolution multi-courbes."""
+"""Graphique d'évolution avec switch € / %."""
 from datetime import date as _date, datetime
 from nicegui import ui
 
 
 def render_chart(valorisations, transactions, color, c, is_dark):
-    """Graphique ECharts : valorisation + apports cumulés + +/- value."""
+    """Graphique ECharts : courbe principale (Valorisation € OU Rendement %).
+
+    Détails (capital investi, +/- value) affichés dans le tooltip au survol.
+    """
     text_color = c['text_primary']
     grid_color = c['card_border']
 
@@ -22,13 +25,12 @@ def render_chart(valorisations, transactions, color, c, is_dark):
 
     valo_by_date = {str(v['date']): v['montant'] for v in valorisations}
 
-    # Apports cumulés — UNIQUEMENT les flux externes (parent_transaction_id is None)
+    # Apports cumulés — UNIQUEMENT les flux externes
     apports_par_date = {}
     cumul = 0
     for d in sorted_dates:
         for t in transactions:
             if str(t['date']) == d:
-                # 🚫 Exclure les arbitrages internes
                 if t.get('parent_transaction_id') is not None:
                     continue
                 if t['type'] == 'versement':
@@ -37,29 +39,55 @@ def render_chart(valorisations, transactions, color, c, is_dark):
                     cumul -= t['montant']
         apports_par_date[d] = cumul
 
-    # Interpolation des valeurs
-    interpolated_valos = {}
+    # Construction des séries de données
     last_valo = 0
-    valos_data = []  # Format [timestamp_ms, valeur] pour ECharts time axis
-    apports_data = []
-    plus_values_data = []
+    interpolated_valos = {}
+    valos_data = []  # [ts_ms, valeur €]
+    apports_data = []  # [ts_ms, capital investi]
+    plus_values_data = []  # [ts_ms, +/- value €]
+    rendement_data = []  # [ts_ms, rendement %]
 
     for d in sorted_dates:
         if d in valo_by_date:
             last_valo = valo_by_date[d]
-
         interpolated_valos[d] = round(last_valo, 2)
 
-        # Conversion ISO date → timestamp ms (ce qu'attend ECharts en mode 'time')
         try:
             ts_ms = int(datetime.fromisoformat(d).timestamp() * 1000)
         except Exception:
             continue
 
         ap = apports_par_date.get(d, 0)
+        pv = last_valo - ap
+        rdt_pct = (pv / ap * 100) if ap > 0 else 0
+
         valos_data.append([ts_ms, round(last_valo, 2)])
         apports_data.append([ts_ms, round(ap, 2)])
-        plus_values_data.append([ts_ms, round(last_valo - ap, 2)])
+        plus_values_data.append([ts_ms, round(pv, 2)])
+        rendement_data.append([ts_ms, round(rdt_pct, 2)])
+
+    # 🎯 Calcul des bornes Y pour CHAQUE mode
+    def compute_bounds(values):
+        """Calcule [min, max] avec marges 0.8/1.2."""
+        if not values:
+            return 0, 100
+        v_min = min(values)
+        v_max = max(values)
+        if v_min >= 0:
+            y_min = v_min * 0.9
+        else:
+            y_min = v_min * 1.1
+        if v_max >= 0:
+            y_max = v_max * 1.1
+        else:
+            y_max = v_max * 0.9
+        if abs(y_max - y_min) < 0.5:
+            y_min -= 1
+            y_max += 1
+        return round(y_min, 2), round(y_max, 2)
+
+    valo_y_min, valo_y_max = compute_bounds([v[1] for v in valos_data])
+    rdt_y_min, rdt_y_max = compute_bounds([v[1] for v in rendement_data])
 
     # Marqueurs achats/ventes
     markers = []
@@ -79,7 +107,18 @@ def render_chart(valorisations, transactions, color, c, is_dark):
             except Exception:
                 pass
 
-    ui.echart({
+    # ─── État du switch € / % ───
+    chart_state = {'mode': 'eur'}  # 'eur' ou 'pct'
+
+    # ─── UI : Header avec switch ───
+    with ui.row().classes('w-full items-center justify-end gap-2 mb-2'):
+        toggle = ui.toggle(
+            {'eur': '💶 EUR', 'pct': '📊 %'},
+            value='eur',
+        ).props('toggle-color="primary" dense')
+
+    # ─── ECharts ───
+    chart_ref = ui.echart({
         'tooltip': {
             'trigger': 'axis',
             'backgroundColor': '#0f172a',
@@ -91,21 +130,41 @@ def render_chart(valorisations, transactions, color, c, is_dark):
                 var dateStr = d.getDate().toString().padStart(2, '0') + '/' 
                             + (d.getMonth()+1).toString().padStart(2, '0') + '/'
                             + d.getFullYear();
-                var html = '<b>' + dateStr + '</b><br/>';
+
+                // Récupérer les valeurs des 4 séries (visibles + invisibles)
+                var valo = null, capital = null, pv = null, rdt = null;
                 params.forEach(function(p) {
-                    html += p.marker + ' ' + p.seriesName + ' : <b>' 
-                          + p.value[1].toLocaleString('fr-FR', {minimumFractionDigits: 2, maximumFractionDigits: 2}) 
-                          + ' €</b><br/>';
+                    if (p.seriesName === 'Valorisation') valo = p.value[1];
+                    else if (p.seriesName === 'Capital investi') capital = p.value[1];
+                    else if (p.seriesName === '+/- value') pv = p.value[1];
+                    else if (p.seriesName === 'Rendement') rdt = p.value[1];
                 });
+
+                var fmt = function(n) {
+                    return n.toLocaleString('fr-FR', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+                };
+
+                var html = '<b>📅 ' + dateStr + '</b><br/>';
+                if (valo !== null) {
+                    html += '💎 Valorisation : <b>' + fmt(valo) + ' €</b><br/>';
+                }
+                if (capital !== null) {
+                    html += '💰 Capital investi : <b>' + fmt(capital) + ' €</b><br/>';
+                }
+                if (pv !== null) {
+                    var emoji = pv >= 0 ? '✅' : '❌';
+                    var sign = pv >= 0 ? '+' : '';
+                    html += emoji + ' +/- value : <b>' + sign + fmt(pv) + ' €</b>';
+                    if (rdt !== null) {
+                        html += ' (<b>' + sign + fmt(rdt) + ' %</b>)';
+                    }
+                    html += '<br/>';
+                }
                 return html;
             }''',
         },
-        'legend': {
-            'data': ['Valorisation', 'Capital investi', '+/- value'],
-            'textStyle': {'color': text_color},
-            'top': 0,
-        },
-        'grid': {'left': 70, 'right': 30, 'top': 50, 'bottom': 60},
+        'legend': {'show': False},  # Pas de légende, on a le switch
+        'grid': {'left': 70, 'right': 30, 'top': 30, 'bottom': 60},
         'xAxis': {
             'type': 'time',
             'axisLine': {'lineStyle': {'color': grid_color}},
@@ -119,6 +178,8 @@ def render_chart(valorisations, transactions, color, c, is_dark):
             'type': 'value',
             'name': 'EUR',
             'nameTextStyle': {'color': c['text_secondary']},
+            'min': valo_y_min,
+            'max': valo_y_max,
             'axisLine': {'lineStyle': {'color': grid_color}},
             'axisLabel': {
                 'color': c['text_secondary'],
@@ -140,11 +201,13 @@ def render_chart(valorisations, transactions, color, c, is_dark):
             },
         ],
         'series': [
+            # ─ Série visible : Valorisation ─
             {
                 'name': 'Valorisation',
                 'type': 'line',
                 'data': valos_data,
                 'smooth': True,
+                'smoothMonotone': 'x',
                 'symbol': 'none',
                 'lineStyle': {'color': color, 'width': 3},
                 'itemStyle': {'color': color},
@@ -165,32 +228,59 @@ def render_chart(valorisations, transactions, color, c, is_dark):
                     'label': {'show': False},
                 } if markers else {},
             },
+            # ─ Séries invisibles (pour tooltip uniquement) ─
             {
                 'name': 'Capital investi',
                 'type': 'line',
                 'data': apports_data,
-                'smooth': False,
-                'step': 'end',
                 'symbol': 'none',
-                'lineStyle': {
-                    'color': '#a855f7',
-                    'width': 2,
-                    'type': 'dashed'
-                },
-                'itemStyle': {'color': '#a855f7'},
+                'lineStyle': {'opacity': 0},  # Invisible
+                'itemStyle': {'opacity': 0},
+                'silent': True,
             },
             {
                 'name': '+/- value',
                 'type': 'line',
                 'data': plus_values_data,
-                'smooth': True,
                 'symbol': 'none',
-                'lineStyle': {
-                    'color': '#10b981',
-                    'width': 1,
-                    'opacity': 0.6
-                },
-                'itemStyle': {'color': '#10b981'},
+                'lineStyle': {'opacity': 0},
+                'itemStyle': {'opacity': 0},
+                'silent': True,
+            },
+            {
+                'name': 'Rendement',
+                'type': 'line',
+                'data': rendement_data,
+                'symbol': 'none',
+                'lineStyle': {'opacity': 0},
+                'itemStyle': {'opacity': 0},
+                'silent': True,
             },
         ],
     }).classes('w-full').style('height: 400px;')
+
+    # ─── Switch handler : bascule entre € et % ───
+    def on_toggle_change(e):
+        new_mode = e.value
+        chart_state['mode'] = new_mode
+
+        if new_mode == 'eur':
+            # Mode Valorisation €
+            chart_ref.options['series'][0]['name'] = 'Valorisation'
+            chart_ref.options['series'][0]['data'] = valos_data
+            chart_ref.options['yAxis'][0]['name'] = 'EUR'
+            chart_ref.options['yAxis'][0]['min'] = valo_y_min
+            chart_ref.options['yAxis'][0]['max'] = valo_y_max
+            chart_ref.options['yAxis'][0]['axisLabel']['formatter'] = '{value} €'
+        else:
+            # Mode Rendement %
+            chart_ref.options['series'][0]['name'] = 'Rendement'
+            chart_ref.options['series'][0]['data'] = rendement_data
+            chart_ref.options['yAxis'][0]['name'] = '%'
+            chart_ref.options['yAxis'][0]['min'] = rdt_y_min
+            chart_ref.options['yAxis'][0]['max'] = rdt_y_max
+            chart_ref.options['yAxis'][0]['axisLabel']['formatter'] = '{value} %'
+
+        chart_ref.update()
+
+    toggle.on('update:model-value', on_toggle_change)

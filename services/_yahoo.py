@@ -85,24 +85,15 @@ def get_currency_rate(from_curr: str, to_curr: str = 'EUR') -> Optional[float]:
 
 
 def get_yahoo_history(symbol: str, start_date, end_date=None) -> list[dict]:
-    """Récupère l'historique des cours quotidiens d'un titre.
-
-    Args:
-        symbol: ticker Yahoo (ex: 'MC.PA', 'AAPL')
-        start_date: date.date de début
-        end_date: date.date de fin (défaut: aujourd'hui)
-
-    Returns:
-        Liste de dicts {'date': date, 'cours': float, 'currency': str}
-    """
+    """Récupère l'historique des cours quotidiens d'un titre."""
     from datetime import date as _date
+    import math
 
     if end_date is None:
         end_date = _date.today()
 
     try:
         ticker = yf.Ticker(symbol)
-        # period='max' fonctionne aussi, mais on préfère contrôler les dates
         hist = ticker.history(
             start=start_date.isoformat(),
             end=(end_date).isoformat(),
@@ -113,18 +104,20 @@ def get_yahoo_history(symbol: str, start_date, end_date=None) -> list[dict]:
             print(f'   ⚠️  Aucun historique pour {symbol}')
             return []
 
-        # Devise du titre
         try:
             currency = ticker.fast_info.get('currency', 'USD')
         except Exception:
             currency = 'USD'
 
-        # Conversion DataFrame → liste de dicts
+        # Conversion DataFrame → liste de dicts (filtrage des NaN)
         result = []
         for idx, row in hist.iterrows():
+            cours = float(row['Close'])
+            if math.isnan(cours) or math.isinf(cours) or cours <= 0:
+                continue
             result.append({
-                'date': idx.date(),  # idx est un Timestamp pandas
-                'cours': float(row['Close']),
+                'date': idx.date(),
+                'cours': cours,
                 'currency': currency,
             })
 

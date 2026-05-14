@@ -302,14 +302,12 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                     .style(f'color: {c["text_secondary"]}')
 
                 with ui.row().classes('w-full gap-3'):
-                    is_action = pos.get('categorie') == 'Action'
-                    qte_format = '%g' if is_action else '%.4f'
-                    qte_step = 1 if is_action else 0.0001
-
+                    # 🆕 Toutes les catégories autorisent des fractions
+                    is_action = False  # Conservé pour compatibilité downstream
                     quantite_input = ui.number(
                         '🔢 Quantité à vendre',
                         value=pos['quantite'],  # Par défaut : tout vendre
-                        format=qte_format, min=0, step=qte_step,
+                        format='%.4f', min=0, step=0.0001,
                         max=pos['quantite']
                     ).classes('flex-1')
 
@@ -373,14 +371,14 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                         pass
 
                 def update_qte_from_montant():
+                    """Recalcule la quantité depuis montant ÷ prix (toujours fractionnaire)."""
                     if updating['value']:
                         return
                     try:
                         m = float(montant_input.value or 0)
                         p = float(prix_input.value or 0)
                         if p > 0:
-                            new_qte = m / p
-                            new_qte = int(new_qte) if is_action else round(new_qte, 4)
+                            new_qte = round(m / p, 4)
                             new_qte = min(new_qte, pos['quantite'])  # Cap au max détenu
                             updating['value'] = True
                             quantite_input.value = new_qte
@@ -409,12 +407,15 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                 )
 
                 def update_summary():
+                    """Affiche le récap en recalculant TOUJOURS depuis quantité × prix."""
                     try:
                         q = float(quantite_input.value or 0)
-                        m = float(montant_input.value or 0)
                         p = float(prix_input.value or 0)
                         f = float(frais_input.value or 0)
                         pru = pos['prix_moyen']
+
+                        # 🆕 Toujours recalculer m depuis q × p
+                        m = round(q * p, 2)
 
                         montant_net = m - f
                         cout_revient = q * pru
@@ -442,7 +443,7 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                             f'{warning}'
                         )
                         if portefeuille.type in ['Assurance-Vie', 'PER'] and not state['selected_fonds_euro_id'] and (
-                                q > 0 or f > 0):  # <-- MODIFIÉ
+                                q > 0 or f > 0):
                             summary_label.text += "\n\n🚨 Choisissez un Fonds Euro de destination !"
 
                     except (TypeError, ValueError):
@@ -482,16 +483,11 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                             )
                             return
 
-                        if pos.get('categorie') == 'Action' and q != int(q):
-                            ui.notify(
-                                'Quantité entière requise pour une action',
-                                type='negative'
-                            )
-                            return
+
 
                         # Validation spécifique Assurance-Vie / PER
                         if portefeuille.type in ['Assurance-Vie', 'PER'] and not state[
-                            'selected_fonds_euro_id']:  # <-- MODIFIÉ
+                            'selected_fonds_euro_id']:
                             ui.notify('Veuillez sélectionner un Fonds Euro de destination.', type='negative')
                             return
 
@@ -518,7 +514,7 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                                 portefeuille_id=portefeuille_id,
                                 date_operation=date_val,
                                 type_operation='vente',
-                                montant=montant_brut,  # Montant brut de la vente (avant frais)
+                                montant=montant_brut,
                                 libelle=f'Vente {q:g} × {pos["nom"][:30]}',
                                 ticker=pos.get('ticker'),
                                 code=pos.get('code'),
@@ -528,29 +524,29 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                                 prix_unitaire=p_unit,
                             )
                             session.add(tx_vente)
-                            session.flush()  # Flush pour obtenir l'ID de tx_vente si nécessaire pour parent_transaction_id
+                            session.flush()
 
                             # --- GESTION DU FLUX DE TRÉSORERIE DE LA VENTE ---
-                            if portefeuille.type in ['Assurance-Vie', 'PER']:  # <-- MODIFIÉ
+                            if portefeuille.type in ['Assurance-Vie', 'PER']:
                                 # Récupérer le Fonds Euro de destination
                                 fonds_euro_cible = session.get(Position, state['selected_fonds_euro_id'])
                                 if not fonds_euro_cible:
                                     ui.notify("Fonds Euro de destination introuvable", type='negative')
-                                    session.rollback()  # Annuler les changements
+                                    session.rollback()
                                     return
 
                                 # Créer une transaction de versement dans le Fonds Euro
                                 tx_versement_fonds_euro = Transaction(
                                     portefeuille_id=portefeuille_id,
                                     date_operation=date_val,
-                                    type_operation='versement',  # Marque comme versement
-                                    montant=montant_brut,  # Montant de la vente
+                                    type_operation='versement',
+                                    montant=montant_brut,
                                     libelle=f'Arbitrage IN (produit de vente {pos["nom"][:20]}) vers {fonds_euro_cible.nom[:20]}',
                                     nom_titre=fonds_euro_cible.nom,
                                     categorie=fonds_euro_cible.categorie,
                                     quantite=montant_brut / fonds_euro_cible.prix_moyen if fonds_euro_cible.prix_moyen > 0 else 0,
                                     prix_unitaire=fonds_euro_cible.prix_moyen,
-                                    parent_transaction_id=tx_vente.id,  # Lier à la transaction de vente
+                                    parent_transaction_id=tx_vente.id,
                                 )
                                 session.add(tx_versement_fonds_euro)
 
@@ -568,24 +564,20 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                                         libelle=f'Frais vente {pos["nom"][:20]} (déduits de {fonds_euro_cible.nom[:20]})',
                                         nom_titre=fonds_euro_cible.nom,
                                         categorie=fonds_euro_cible.categorie,
-                                        # Si frais en parts, calculer la quantité
                                         quantite=frais / fonds_euro_cible.prix_moyen if fonds_euro_cible.prix_moyen > 0 else 0,
                                         prix_unitaire=fonds_euro_cible.prix_moyen,
                                         parent_transaction_id=tx_vente.id,
                                     )
                                     session.add(tx_frais_fonds_euro)
-                                    # Mettre à jour la position du Fonds Euro pour les frais
                                     fonds_euro_cible.quantite -= (
                                         frais / fonds_euro_cible.prix_moyen if fonds_euro_cible.prix_moyen > 0 else 0)
 
-                            else:  # Comportement par défaut pour les autres types de portefeuilles (ajout au cash)
-                                # Crédit du cash
+                            else:  # PEA/CTO : crédit du cash
                                 ajuster_cash(
                                     session, portefeuille_id,
                                     impact_cash('vente', montant_brut)
                                 )
 
-                                # Frais liés
                                 if frais > 0:
                                     tx_frais = Transaction(
                                         portefeuille_id=portefeuille_id,
@@ -602,6 +594,19 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                                     )
 
                             session.commit()
+
+                        # 🆕 Backfill cours historiques + valorisations (hors session)
+                        try:
+                            from services.backfill import (
+                                backfill_cours_historique, backfill_valorisations
+                            )
+                            # Si la position vendue avait un ticker Yahoo, rafraîchir l'historique
+                            if pos.get('ticker'):
+                                backfill_cours_historique(portefeuille_id)
+                            # Toujours recalculer les valorisations (cash + positions)
+                            backfill_valorisations(portefeuille_id)
+                        except Exception as e:
+                            print(f'⚠️ Backfill échoué après vente : {e}')
 
                         # Notification avec +/- value
                         cout = q * pos['prix_moyen']

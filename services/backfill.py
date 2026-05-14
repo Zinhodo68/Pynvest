@@ -17,17 +17,15 @@ from services._yahoo import get_yahoo_history, get_currency_rate
 
 
 def backfill_cours_historique(portefeuille_id: int) -> int:
-    """Télécharge l'historique Yahoo pour les tickers présents dans les transactions.
+    """Télécharge l'historique Yahoo pour les tickers présents dans les transactions."""
+    import math
+    import re
 
-    Source = transactions d'achat/vente (et pas seulement positions actuelles),
-    pour gérer les titres déjà revendus.
-    """
     with get_session() as session:
         p = session.get(Portefeuille, portefeuille_id)
         if not p or not p.transactions:
             return 0
 
-        # Date de départ = première transaction d'achat
         achats = [t for t in p.transactions if t.type_operation == 'achat']
         if not achats:
             print('   ℹ️  Aucun achat enregistré')
@@ -37,14 +35,22 @@ def backfill_cours_historique(portefeuille_id: int) -> int:
         end_date = date.today()
         total_inserted = 0
 
-        # Récupérer tous les tickers Yahoo présents dans les transactions
+        # 🛡️ Filtrage des faux tickers
+        ISIN_PATTERN = re.compile(r'^[A-Z]{2}[A-Z0-9]{9}\d$')
+        VALID_TICKER_PATTERN = re.compile(r'^[A-Z0-9][A-Z0-9.\-=^]{0,14}$')
+
         tickers = set()
         for t in p.transactions:
             if t.type_operation in ('achat', 'vente') and t.ticker:
-                tickers.add(t.ticker)
+                ticker = t.ticker.strip()
+                if ISIN_PATTERN.match(ticker):
+                    continue
+                if not VALID_TICKER_PATTERN.match(ticker):
+                    continue
+                tickers.add(ticker)
 
         if not tickers:
-            print('   ⚠️ Aucun ticker Yahoo dans les transactions')
+            print('   ⚠️ Aucun ticker Yahoo valide dans les transactions')
             return 0
 
         print(f'   📥 Téléchargement historique pour {len(tickers)} ticker(s)')
@@ -72,11 +78,16 @@ def backfill_cours_historique(portefeuille_id: int) -> int:
                 if h['date'] in existing_dates:
                     continue
 
+                cours_eur = h['cours'] * rate
+                # 🛡️ Double sécurité : ne jamais insérer NaN/inf
+                if math.isnan(cours_eur) or math.isinf(cours_eur) or cours_eur <= 0:
+                    continue
+
                 session.add(CoursHistorique(
                     ticker=ticker,
                     isin=None,
                     date_cours=h['date'],
-                    cours=h['cours'] * rate,
+                    cours=cours_eur,
                     devise='EUR',
                     source='yahoo_backfill',
                 ))
@@ -85,7 +96,13 @@ def backfill_cours_historique(portefeuille_id: int) -> int:
             print(f'   ✅ {ticker}: {inserted} cours insérés')
             total_inserted += inserted
 
-        session.commit()
+            # 🆕 Commit incrémental ticker par ticker
+            try:
+                session.commit()
+            except Exception as e:
+                print(f'   ❌ Commit échoué pour {ticker}: {e}')
+                session.rollback()
+
         return total_inserted
 
 
