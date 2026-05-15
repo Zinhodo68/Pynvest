@@ -89,24 +89,6 @@ def render_chart(valorisations, transactions, color, c, is_dark):
     valo_y_min, valo_y_max = compute_bounds([v[1] for v in valos_data])
     rdt_y_min, rdt_y_max = compute_bounds([v[1] for v in rendement_data])
 
-    # Marqueurs achats/ventes
-    markers = []
-    for t in transactions:
-        if t['type'] in ('achat', 'vente'):
-            symbol_emoji = '🛒' if t['type'] == 'achat' else '💹'
-            color_marker = '#8b5cf6' if t['type'] == 'achat' else '#ec4899'
-            date_str = str(t['date'])
-            try:
-                ts_ms = int(datetime.fromisoformat(date_str).timestamp() * 1000)
-                markers.append({
-                    'name': symbol_emoji,
-                    'coord': [ts_ms, interpolated_valos.get(date_str, 0)],
-                    'value': t['type'],
-                    'itemStyle': {'color': color_marker},
-                })
-            except Exception:
-                pass
-
     # ─── État du switch € / % ───
     chart_state = {'mode': 'eur'}  # 'eur' ou 'pct'
 
@@ -221,12 +203,7 @@ def render_chart(valorisations, transactions, color, c, is_dark):
                         ]
                     }
                 },
-                'markPoint': {
-                    'data': markers,
-                    'symbol': 'pin',
-                    'symbolSize': 30,
-                    'label': {'show': False},
-                } if markers else {},
+                # 🆕 markPoint supprimé : plus de pins d'achat/vente
             },
             # ─ Séries invisibles (pour tooltip uniquement) ─
             {

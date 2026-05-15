@@ -1,6 +1,7 @@
-from sqlalchemy import Column, Integer, String, Date, DateTime, Float, ForeignKey, Text, Boolean, func
 from sqlalchemy.orm import relationship
 from database.db import Base
+from datetime import datetime                          # pour les champs created_at / updated_at
+from sqlalchemy import Column, Integer, String, DateTime, CheckConstraint, Date, Float, ForeignKey, Text, Boolean, func
 
 
 class Membre(Base):
@@ -150,6 +151,26 @@ class Portefeuille(Base):
             'nb_transactions': len(self.transactions),
         }
 
+class SupportLabel(Base):
+    """
+    Noms personnalisés pour les supports d'investissement.
+    Prioritaire sur le nom retourné par Yahoo Finance ou Boursorama.
+    La clé de lookup est le ticker Yahoo (ex: 'MC.PA')
+    OU le code ISIN (ex: 'FR0010149120') pour les OPCVM.
+    """
+    __tablename__ = 'support_labels'
+
+    id          = Column(Integer, primary_key=True)
+    ticker      = Column(String, nullable=True, index=True)  # ex: 'MC.PA'
+    code        = Column(String, nullable=True, index=True)  # ex: 'FR0010149120' (OPCVM)
+    custom_name = Column(String, nullable=False)             # ex: 'LVMH Moët Hennessy'
+    original_name = Column(String, nullable=True)            # snapshot du nom Yahoo (audit)
+    created_at  = Column(DateTime, default=datetime.utcnow)
+    updated_at  = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        CheckConstraint('ticker IS NOT NULL OR code IS NOT NULL',
+                        name='ck_support_labels_has_identifier'),)
 
 class Valorisation(Base):
     """Snapshot de la valeur du portefeuille à une date donnée."""

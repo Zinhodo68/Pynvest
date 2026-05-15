@@ -10,6 +10,7 @@ from sqlalchemy import select
 from database.db import get_session
 from database.models import Portefeuille, Transaction, CoursHistorique
 from utils.formatters import format_money, format_percent, get_perf_color
+from services.labels import get_display_name  # ✅ Import ajouté
 
 
 def get_situation_at_date(portefeuille_id: int, target_date: date) -> dict:
@@ -26,7 +27,6 @@ def get_situation_at_date(portefeuille_id: int, target_date: date) -> dict:
         if not ptf:
             return None
 
-        # Filtrer les transactions jusqu'à target_date inclus
         transactions = sorted(
             [t for t in ptf.transactions if t.date_operation <= target_date],
             key=lambda t: t.date_operation
@@ -34,7 +34,7 @@ def get_situation_at_date(portefeuille_id: int, target_date: date) -> dict:
 
         if not transactions:
             return {
-                'portefeuille_nom': ptf.nom_affiche,  # ← MODIFIÉ
+                'portefeuille_nom': ptf.nom_affiche,
                 'portefeuille_type': ptf.type,
                 'date_situation': target_date,
                 'positions': [],
@@ -46,13 +46,11 @@ def get_situation_at_date(portefeuille_id: int, target_date: date) -> dict:
                 'plus_value_pct': 0.0,
             }
 
-        # Identifier les transactions internes (arbitrages)
         parent_ids_with_child = {
             t.parent_transaction_id for t in transactions
             if t.parent_transaction_id is not None
         }
 
-        # Charger les cours historiques pour tous les tickers concernés
         tickers = set()
         for t in transactions:
             if t.type_operation in ('achat', 'vente') and t.ticker:
@@ -71,7 +69,6 @@ def get_situation_at_date(portefeuille_id: int, target_date: date) -> dict:
                 cours_par_ticker[ticker].append((d, cours))
 
         def get_cours_a_date(ticker: str, target: date):
-            """Dernier cours connu à une date donnée (forward-fill)."""
             cours_list = cours_par_ticker.get(ticker, [])
             last = None
             for d, c in cours_list:
@@ -81,10 +78,9 @@ def get_situation_at_date(portefeuille_id: int, target_date: date) -> dict:
                     break
             return last
 
-        # Rejeu des transactions
         cash = 0.0
         total_verse = 0.0
-        positions_held = {}  # key → dict de position
+        positions_held = {}
 
         for t in transactions:
             key = t.ticker or t.code or t.nom_titre
@@ -187,11 +183,9 @@ def get_situation_at_date(portefeuille_id: int, target_date: date) -> dict:
                 if t.quantite is not None and key in positions_held:
                     positions_held[key]['quantite'] -= t.quantite
 
-        # Construire la liste finale des positions (avec valorisation)
         positions_list = []
         valo_titres = 0.0
 
-        # Trier : titres d'abord, réserves de liquidités à la fin
         def is_reserve(p):
             return p.get('categorie') in ('Cash', 'Fonds €', 'Fonds Euro')
 
@@ -205,7 +199,7 @@ def get_situation_at_date(portefeuille_id: int, target_date: date) -> dict:
             if ticker:
                 cours = get_cours_a_date(ticker, target_date)
             if cours is None:
-                cours = pos['pru']  # fallback PRU
+                cours = pos['pru']
 
             valo = qte * cours
             cout_revient = qte * pos['pru']
@@ -227,15 +221,16 @@ def get_situation_at_date(portefeuille_id: int, target_date: date) -> dict:
             })
             valo_titres += valo
 
-        # Tri : non-réserves d'abord (par valorisation décroissante), puis réserves
         positions_list.sort(key=lambda p: (p['is_reserve'], -p['valorisation']))
 
         valo_totale = cash + valo_titres
         plus_value_globale = valo_totale - total_verse
-        pv_pct_globale = (plus_value_globale / total_verse * 100) if total_verse > 0 else 0
+        pv_pct_globale = (
+            plus_value_globale / total_verse * 100
+        ) if total_verse > 0 else 0
 
         return {
-            'portefeuille_nom': ptf.nom_affiche,  # ← MODIFIÉ
+            'portefeuille_nom': ptf.nom_affiche,
             'portefeuille_type': ptf.type,
             'date_situation': target_date,
             'positions': positions_list,
@@ -249,11 +244,7 @@ def get_situation_at_date(portefeuille_id: int, target_date: date) -> dict:
 
 
 def get_available_years(portefeuille_id: int) -> list[int]:
-    """Retourne la liste des années pour lesquelles un relevé peut être généré.
-
-    Une année est éligible si elle est entièrement écoulée (31/12 < aujourd'hui)
-    ET qu'au moins une transaction existe avant ou pendant cette année.
-    """
+    """Retourne la liste des années pour lesquelles un relevé peut être généré."""
     with get_session() as session:
         ptf = session.get(Portefeuille, portefeuille_id)
         if not ptf or not ptf.transactions:
@@ -262,9 +253,8 @@ def get_available_years(portefeuille_id: int) -> list[int]:
         first_year = min(t.date_operation.year for t in ptf.transactions)
         current_year = date.today().year
 
-        # On propose toutes les années depuis la 1ère transaction jusqu'à l'année dernière
         years = list(range(first_year, current_year))
-        return sorted(years, reverse=True)  # plus récent en premier
+        return sorted(years, reverse=True)
 
 
 def show_releve_annuel(portefeuille_id: int, annee: int, c, is_dark):
@@ -314,7 +304,6 @@ def show_releve_annuel(portefeuille_id: int, annee: int, c, is_dark):
                 c, color=pv_color
             )
 
-        # Détail
         with ui.row().classes('w-full gap-4 mt-2'):
             _render_kpi('💵 Cash / Liquidités',
                         format_money(situation['cash'], decimals=2),
@@ -334,18 +323,21 @@ def show_releve_annuel(portefeuille_id: int, annee: int, c, is_dark):
                 ui.label('Aucune position détenue à cette date').classes('text-sm') \
                     .style(f'color: {c["text_secondary"]}')
         else:
-            ui.label(f"📦 Détail des positions ({len(situation['positions'])} ligne(s))") \
-                .classes('text-sm font-bold').style(f'color: {c["text_primary"]}')
+            ui.label(
+                f"📦 Détail des positions ({len(situation['positions'])} ligne(s))"
+            ).classes('text-sm font-bold').style(f'color: {c["text_primary"]}')
 
             with ui.column().classes('w-full gap-1').style(
                     'max-height: 400px; overflow-y: auto;'
             ):
-                # Header
-                with ui.row().classes('w-full items-center px-3 py-2 rounded-lg').style(
-                        f'background-color: {c["card_border"]}40; '
-                        f'font-size: 0.7rem; font-weight: 600; '
-                        f'letter-spacing: 0.05em; '
-                        f'color: {c["text_secondary"]};'
+                # Header tableau
+                with ui.row().classes(
+                        'w-full items-center px-3 py-2 rounded-lg'
+                ).style(
+                    f'background-color: {c["card_border"]}40; '
+                    f'font-size: 0.7rem; font-weight: 600; '
+                    f'letter-spacing: 0.05em; '
+                    f'color: {c["text_secondary"]};'
                 ):
                     ui.label('TITRE').style('flex: 2;')
                     ui.label('CATÉGORIE').style('flex: 1;')
@@ -360,8 +352,10 @@ def show_releve_annuel(portefeuille_id: int, annee: int, c, is_dark):
                 for pos in situation['positions']:
                     # Séparateur visuel avant les réserves
                     if pos['is_reserve'] and not reserves_separator_added:
-                        with ui.row().classes('w-full items-center px-3 py-1 mt-2').style(
-                                f'border-top: 1px dashed {c["card_border"]};'
+                        with ui.row().classes(
+                                'w-full items-center px-3 py-1 mt-2'
+                        ).style(
+                            f'border-top: 1px dashed {c["card_border"]};'
                         ):
                             ui.icon('savings').classes('text-xs').style(
                                 f'color: {c["text_secondary"]}'
@@ -371,11 +365,19 @@ def show_releve_annuel(portefeuille_id: int, annee: int, c, is_dark):
                             ).style(f'color: {c["text_secondary"]}')
                         reserves_separator_added = True
 
+                    # ✅ Résolution du nom d'affichage (custom > original)
+                    display_name = get_display_name(
+                        ticker=pos.get('ticker'),
+                        code=pos.get('code'),
+                        fallback=pos['nom']
+                    )
+
                     pv_color = get_perf_color(pos['plus_value'])
                     with ui.row().classes(
                             'w-full items-center px-3 py-2 rounded-lg'
                     ).style(f'background-color: {c["card_border"]}15;'):
-                        ui.label(pos['nom']).style(
+                        # ✅ Utilisation de display_name au lieu de pos['nom']
+                        ui.label(display_name).style(
                             f'flex: 2; font-weight: 500; '
                             f'color: {c["text_primary"]}; '
                             f'overflow: hidden; text-overflow: ellipsis; '
@@ -386,15 +388,20 @@ def show_releve_annuel(portefeuille_id: int, annee: int, c, is_dark):
                             f'font-size: 0.85rem;'
                         )
                         ui.label(f"{pos['quantite']:g}").style(
-                            f'flex: 1; text-align: right; color: {c["text_primary"]};'
+                            f'flex: 1; text-align: right; '
+                            f'color: {c["text_primary"]};'
                         )
                         ui.label(format_money(pos['pru'], decimals=2)).style(
-                            f'flex: 1; text-align: right; color: {c["text_secondary"]};'
+                            f'flex: 1; text-align: right; '
+                            f'color: {c["text_secondary"]};'
                         )
                         ui.label(format_money(pos['cours'], decimals=2)).style(
-                            f'flex: 1; text-align: right; color: {c["text_primary"]};'
+                            f'flex: 1; text-align: right; '
+                            f'color: {c["text_primary"]};'
                         )
-                        ui.label(format_money(pos['valorisation'], decimals=2)).style(
+                        ui.label(
+                            format_money(pos['valorisation'], decimals=2)
+                        ).style(
                             f'flex: 1.2; text-align: right; '
                             f'font-weight: 600; color: {c["text_primary"]};'
                         )
@@ -413,7 +420,6 @@ def show_releve_annuel(portefeuille_id: int, annee: int, c, is_dark):
                                 f'font-weight: 600; color: {pv_color};'
                             )
 
-        # Bouton fermer
         with ui.row().classes('w-full justify-end mt-3'):
             ui.button('Fermer', on_click=dialog.close).props('unelevated') \
                 .classes('bg-blue-600 text-white')
@@ -430,7 +436,9 @@ def _render_kpi(label, value, c, color=None, small=False):
     with ui.column().classes('gap-0 px-3 py-2 rounded-lg').style(
             f'background-color: {c["card_border"]}30; flex: 1;'
     ):
-        ui.label(label).classes(f'{label_size} font-semibold tracking-wider').style(
-            f'color: {c["text_secondary"]}'
+        ui.label(label).classes(
+            f'{label_size} font-semibold tracking-wider'
+        ).style(f'color: {c["text_secondary"]}')
+        ui.label(value).classes(f'{value_size} font-bold').style(
+            f'color: {color}'
         )
-        ui.label(value).classes(f'{value_size} font-bold').style(f'color: {color}')

@@ -57,7 +57,7 @@ def _render_content(portefeuille_id, c, is_dark, refresh):
 
     # En-tête + KPIs
     render_header(data, type_info, accent_color, c, portefeuille_id, refresh, mono)
-    render_kpis(data, accent_color, c, mono)
+    render_kpis(data, accent_color, c, mono, portefeuille_id=portefeuille_id)
 
     # Graphique
     with ui.card().classes('w-full p-5 rounded-xl').style(

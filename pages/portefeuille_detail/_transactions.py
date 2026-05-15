@@ -9,6 +9,7 @@ from database.models import Transaction, Portefeuille, Position
 from utils.formatters import format_money, format_date_fr
 from pages.portefeuille_detail._cash_helpers import impact_cash, ajuster_cash
 
+from services.labels import get_display_name
 
 def _trigger_backfill_if_needed(portefeuille_id: int, has_ticker: bool):
     """Lance le backfill cours+valorisations si la transaction touche un titre Yahoo.
@@ -41,6 +42,23 @@ def render_transactions_card(transactions, c, is_dark, refresh, portefeuille_id,
         if t.get('parent_transaction_id'):
             parent_id = t['parent_transaction_id']
             frais_by_parent.setdefault(parent_id, []).append(t)
+
+    # Cache local pour éviter de requêter la BDD plusieurs fois pour le même support
+    display_name_cache = {}
+
+    def resolve_display_name(tx: dict) -> str | None:
+        """Retourne le nom d'affichage du support lié à la transaction."""
+        if not tx.get('nom_titre'):
+            return None
+
+        key = (tx.get('ticker'), tx.get('code'), tx.get('nom_titre'))
+        if key not in display_name_cache:
+            display_name_cache[key] = get_display_name(
+                ticker=tx.get('ticker'),
+                code=tx.get('code'),
+                fallback=tx['nom_titre'],
+            )
+        return display_name_cache[key]
 
     with ui.card().classes('p-5 rounded-xl w-full').style(
             f'background-color: {c["card_bg"]}; '
@@ -93,6 +111,9 @@ def render_transactions_card(transactions, c, is_dark, refresh, portefeuille_id,
                 frais_lies = frais_by_parent.get(t['id'], [])
                 total_frais = sum(f['montant'] for f in frais_lies)
 
+                # ✅ Nom d'affichage du support (custom_name si défini)
+                asset_display_name = resolve_display_name(t)
+
                 with ui.row().classes('w-full items-center gap-3 p-2 rounded-lg').style(
                         f'background-color: {c["card_border"]}20;'
                 ):
@@ -133,15 +154,39 @@ def render_transactions_card(transactions, c, is_dark, refresh, portefeuille_id,
                         if total_frais > 0:
                             sub_text += f' • +{format_money(total_frais, decimals=2)} de frais'
 
-                        if t['type'] == 'dividende' and t.get('nom_titre'):
-                            sub_text += f' • Actif: {t["nom_titre"]}'
-                            if (t.get('quantite') is not None and t.get('quantite') > 0 and
-                                    t.get('prix_unitaire') is not None and t.get('prix_unitaire') > 0):
-                                sub_text += f' ({t["quantite"]:g} parts @ {t["prix_unitaire"]:.4f}€)'
-                        elif t['type'] == 'frais' and t.get('nom_titre') and \
-                                (t.get('quantite') is not None and t.get('quantite') > 0 and
-                                 t.get('prix_unitaire') is not None and t.get('prix_unitaire') > 0):
-                            sub_text += f' • Actif: {t["nom_titre"]} ({t["quantite"]:g} parts @ {t["prix_unitaire"]:.4f}€)'
+                        # Affichage du support avec nom personnalisé si disponible
+                        if t['type'] in ('achat', 'vente') and asset_display_name:
+                            sub_text += f' • Actif: {asset_display_name}'
+                            if (
+                                    t.get('quantite') is not None and t.get('quantite') > 0
+                                    and t.get('prix_unitaire') is not None and t.get('prix_unitaire') > 0
+                            ):
+                                sub_text += (
+                                    f' ({t["quantite"]:g} parts @ '
+                                    f'{t["prix_unitaire"]:.4f}€)'
+                                )
+
+                        elif t['type'] == 'dividende' and asset_display_name:
+                            sub_text += f' • Actif: {asset_display_name}'
+                            if (
+                                    t.get('quantite') is not None and t.get('quantite') > 0
+                                    and t.get('prix_unitaire') is not None and t.get('prix_unitaire') > 0
+                            ):
+                                sub_text += (
+                                    f' ({t["quantite"]:g} parts @ '
+                                    f'{t["prix_unitaire"]:.4f}€)'
+                                )
+
+                        elif (
+                                t['type'] == 'frais'
+                                and asset_display_name
+                                and t.get('quantite') is not None and t.get('quantite') > 0
+                                and t.get('prix_unitaire') is not None and t.get('prix_unitaire') > 0
+                        ):
+                            sub_text += (
+                                f' • Actif: {asset_display_name} '
+                                f'({t["quantite"]:g} parts @ {t["prix_unitaire"]:.4f}€)'
+                            )
 
                         ui.label(sub_text).classes('text-xs').style(
                             f'color: {c["text_secondary"]}'
