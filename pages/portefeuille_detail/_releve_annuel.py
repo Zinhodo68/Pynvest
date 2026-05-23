@@ -46,9 +46,15 @@ def get_situation_at_date(portefeuille_id: int, target_date: date) -> dict:
                 'plus_value_pct': 0.0,
             }
 
+        # 🆕 On ne considère comme "arbitrage" QUE les liens entre transactions
+        # de type achat/vente/versement/retrait. Les frais liés à un achat
+        # ne sont PAS un arbitrage.
+        ARBITRAGE_TYPES = {'achat', 'vente', 'versement', 'retrait'}
+
         parent_ids_with_child = {
             t.parent_transaction_id for t in transactions
             if t.parent_transaction_id is not None
+               and t.type_operation in ARBITRAGE_TYPES
         }
 
         tickers = set()
@@ -85,7 +91,11 @@ def get_situation_at_date(portefeuille_id: int, target_date: date) -> dict:
         for t in transactions:
             key = t.ticker or t.code or t.nom_titre
             is_asset_specific_tx = bool(key and t.quantite is not None)
-            is_arbitrage_child = t.parent_transaction_id is not None
+            # 🆕 Un enfant n'est un arbitrage que s'il est de type achat/vente/versement/retrait
+            is_arbitrage_child = (
+                    t.parent_transaction_id is not None
+                    and t.type_operation in ARBITRAGE_TYPES
+            )
             is_arbitrage_parent = t.id in parent_ids_with_child
             is_internal = is_arbitrage_child or is_arbitrage_parent
 
@@ -100,17 +110,35 @@ def get_situation_at_date(portefeuille_id: int, target_date: date) -> dict:
                             'quantite': t.quantite,
                             'pru': t.prix_unitaire if t.prix_unitaire is not None else 1.0,
                         }
+                    # 🆕 Versement asset-specific sur Fonds €/Cash = vrai apport externe
+                    # (sauf si c'est un enfant d'arbitrage)
+                    if (not is_internal
+                            and t.categorie in ('Fonds €', 'Fonds Euro', 'Cash')):
+                        total_verse += t.montant
                 else:
                     cash += t.montant
                     if not is_internal:
                         total_verse += t.montant
 
+
             elif t.type_operation == 'retrait':
+
                 if is_asset_specific_tx:
+
                     if key in positions_held:
                         positions_held[key]['quantite'] -= t.quantite
+
+                    # 🆕 Retrait asset-specific depuis Fonds €/Cash = vrai retrait externe
+
+                    if (not is_internal
+
+                            and t.categorie in ('Fonds €', 'Fonds Euro', 'Cash')):
+                        total_verse -= t.montant
+
                 else:
+
                     cash -= t.montant
+
                     if not is_internal:
                         total_verse -= t.montant
 

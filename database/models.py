@@ -1,8 +1,8 @@
+from typing import ClassVar        # ← ajouter cette ligne
 from sqlalchemy.orm import relationship
 from database.db import Base
-from datetime import datetime                          # pour les champs created_at / updated_at
+from datetime import datetime
 from sqlalchemy import Column, Integer, String, DateTime, CheckConstraint, Date, Float, ForeignKey, Text, Boolean, func
-
 
 class Membre(Base):
     __tablename__ = 'membres'
@@ -18,7 +18,7 @@ class Membre(Base):
     created_at = Column(DateTime, server_default=func.now())
 
     portefeuilles = relationship('Portefeuille', back_populates='proprietaire',
-                                  cascade='all, delete-orphan')
+                                 cascade='all, delete-orphan')
 
     def to_dict(self):
         return {
@@ -54,15 +54,33 @@ class Portefeuille(Base):
                              order_by='Position.nom')
 
     # ✨ Pour les mono-supports (livrets)
-    taux_interet = Column(Float, nullable=True)  # ex: 3.0 pour 3%
-    plafond = Column(Float, nullable=True)  # ex: 22950 pour Livret A
+    taux_interet = Column(Float, nullable=True)
+    plafond = Column(Float, nullable=True)
 
     valorisations = relationship('Valorisation', back_populates='portefeuille',
-                                  cascade='all, delete-orphan',
-                                  order_by='Valorisation.date_valeur')
-    transactions = relationship('Transaction', back_populates='portefeuille',
                                  cascade='all, delete-orphan',
-                                 order_by='Transaction.date_operation')
+                                 order_by='Valorisation.date_valeur')
+    transactions = relationship('Transaction', back_populates='portefeuille',
+                                cascade='all, delete-orphan',
+                                order_by='Transaction.date_operation')
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Cache non-persisté pour les stats agrégées
+    # Rempli par services.portfolio_stats.preload_stats()
+    # ──────────────────────────────────────────────────────────────────────
+    _stats_cache: ClassVar[dict | None] = None
+
+    def set_stats(self, stats: dict) -> None:
+        """Injecte un dict de stats pré-calculées (depuis portfolio_stats)."""
+        self._stats_cache = stats
+
+    def clear_stats(self) -> None:
+        """Invalide le cache (à appeler après une modification)."""
+        self._stats_cache = None
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Propriétés calculées — consultent le cache en priorité
+    # ──────────────────────────────────────────────────────────────────────
 
     @property
     def nom_affiche(self):
@@ -74,10 +92,15 @@ class Portefeuille(Base):
     def valorisation_actuelle(self):
         """Valeur actuelle du portefeuille = somme des positions.
 
-        Note : pour les portefeuilles avec cash résiduel non représenté en Position,
-        il faudrait ajouter le cash. Actuellement, on suppose que tout est en positions
-        (Fonds €, titres, livrets…).
+        Priorité :
+        1. Cache pré-chargé par ``portfolio_stats.preload_stats()``
+        2. Fallback lazy-loading (comportement historique)
         """
+        # 1️⃣ Cache agrégé (0 lazy-load)
+        if self._stats_cache is not None:
+            return self._stats_cache['valorisation_actuelle']
+
+        # 2️⃣ Fallback : lazy loading d'origine
         if self.positions:
             return sum(pos.valorisation for pos in self.positions)
         if self.valorisations:
@@ -88,12 +111,15 @@ class Portefeuille(Base):
     def total_verse(self):
         """Capital investi = uniquement les flux EXTERNES.
 
-        Exclut les arbitrages internes (transactions avec parent_transaction_id),
-        qui sont des transferts entre actifs sans création de richesse.
+        Exclut les arbitrages internes (transactions avec parent_transaction_id).
         """
+        # 1️⃣ Cache agrégé
+        if self._stats_cache is not None:
+            return self._stats_cache['total_verse']
+
+        # 2️⃣ Fallback
         total = 0.0
         for t in self.transactions:
-            # 🛡️ Exclure les arbitrages internes
             if t.parent_transaction_id is not None:
                 continue
             if t.type_operation == 'versement':
@@ -104,17 +130,33 @@ class Portefeuille(Base):
 
     @property
     def plus_value(self):
+        if self._stats_cache is not None:
+            return self._stats_cache['plus_value']
         return self.valorisation_actuelle - self.total_verse
 
     @property
     def rendement_total_pct(self):
+        if self._stats_cache is not None:
+            return self._stats_cache['rendement_total_pct']
         if self.total_verse > 0:
             return (self.plus_value / self.total_verse) * 100
         return 0.0
 
     @property
     def rendement_annualise_pct(self):
-        if not self.date_creation or self.total_verse <= 0:
+        """Rendement annualisé (CAGR).
+
+        Utilise les valeurs du cache si disponible,
+        sinon retombe sur les @property (lazy-load).
+        """
+        if self._stats_cache is not None:
+            total_verse = self._stats_cache['total_verse']
+            valorisation = self._stats_cache['valorisation_actuelle']
+        else:
+            total_verse = self.total_verse
+            valorisation = self.valorisation_actuelle
+
+        if not self.date_creation or total_verse <= 0:
             return 0.0
         from datetime import date as _date
         nb_jours = (_date.today() - self.date_creation).days
@@ -123,12 +165,23 @@ class Portefeuille(Base):
         nb_annees = nb_jours / 365.25
         if nb_annees < 0.1:
             return 0.0
-        ratio = self.valorisation_actuelle / self.total_verse
+        ratio = valorisation / total_verse
         if ratio <= 0:
             return 0.0
         return (ratio ** (1 / nb_annees) - 1) * 100
 
+    # ──────────────────────────────────────────────────────────────────────
+    # Sérialisation
+    # ──────────────────────────────────────────────────────────────────────
+
     def to_dict(self):
+        """Dict pour l'affichage. Utilise le cache si disponible."""
+        # nb_transactions : cache ou fallback len(transactions)
+        if self._stats_cache is not None:
+            nb_transactions = self._stats_cache['nb_transactions']
+        else:
+            nb_transactions = len(self.transactions)
+
         return {
             'id': self.id,
             'type': self.type,
@@ -148,29 +201,27 @@ class Portefeuille(Base):
             'plus_value': self.plus_value,
             'rendement_total_pct': self.rendement_total_pct,
             'rendement_annualise_pct': self.rendement_annualise_pct,
-            'nb_transactions': len(self.transactions),
+            'nb_transactions': nb_transactions,
         }
 
+
 class SupportLabel(Base):
-    """
-    Noms personnalisés pour les supports d'investissement.
-    Prioritaire sur le nom retourné par Yahoo Finance ou Boursorama.
-    La clé de lookup est le ticker Yahoo (ex: 'MC.PA')
-    OU le code ISIN (ex: 'FR0010149120') pour les OPCVM.
-    """
+    """Noms personnalisés pour les supports d'investissement."""
     __tablename__ = 'support_labels'
 
-    id          = Column(Integer, primary_key=True)
-    ticker      = Column(String, nullable=True, index=True)  # ex: 'MC.PA'
-    code        = Column(String, nullable=True, index=True)  # ex: 'FR0010149120' (OPCVM)
-    custom_name = Column(String, nullable=False)             # ex: 'LVMH Moët Hennessy'
-    original_name = Column(String, nullable=True)            # snapshot du nom Yahoo (audit)
-    created_at  = Column(DateTime, default=datetime.utcnow)
-    updated_at  = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    id = Column(Integer, primary_key=True)
+    ticker = Column(String, nullable=True, index=True)
+    code = Column(String, nullable=True, index=True)
+    custom_name = Column(String, nullable=False)
+    original_name = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     __table_args__ = (
         CheckConstraint('ticker IS NOT NULL OR code IS NOT NULL',
-                        name='ck_support_labels_has_identifier'),)
+                        name='ck_support_labels_has_identifier'),
+    )
+
 
 class Valorisation(Base):
     """Snapshot de la valeur du portefeuille à une date donnée."""
@@ -197,13 +248,13 @@ class Transaction(Base):
 
     parent_transaction_id = Column(Integer, ForeignKey('transactions.id'), nullable=True)
 
-    # 🆕 NOUVEAUX CHAMPS pour traçabilité historique des achats/ventes
-    ticker = Column(String(50), nullable=True)        # Ticker Yahoo (ex: 'MC.PA')
-    code = Column(String(50), nullable=True)          # ISIN (pour OPCVM)
-    nom_titre = Column(String(200), nullable=True)    # Nom du titre (snapshot)
-    categorie = Column(String(50), nullable=True)     # Catégorie (snapshot)
-    quantite = Column(Float, nullable=True)           # Quantité achetée/vendue
-    prix_unitaire = Column(Float, nullable=True)      # Prix unitaire au moment de l'opération
+    # Champs enrichis pour traçabilité historique
+    ticker = Column(String(50), nullable=True)
+    code = Column(String(50), nullable=True)
+    nom_titre = Column(String(200), nullable=True)
+    categorie = Column(String(50), nullable=True)
+    quantite = Column(Float, nullable=True)
+    prix_unitaire = Column(Float, nullable=True)
 
     created_at = Column(DateTime, server_default=func.now())
 
@@ -285,14 +336,11 @@ class CoursHistorique(Base):
     __tablename__ = 'cours_historique'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-
     ticker = Column(String(50), nullable=True, index=True)
     isin = Column(String(50), nullable=True, index=True)
-
     date_cours = Column(Date, nullable=False, index=True)
     cours = Column(Float, nullable=False)
     devise = Column(String(10), default='EUR')
-
     source = Column(String(20), nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 

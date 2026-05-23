@@ -422,7 +422,7 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                     ui.button('Continuer →', on_click=go_to_purchase) \
                         .props('unelevated').classes('bg-blue-600 text-white')
 
-        # ─── FORMULAIRE D'ACHAT (inchangé sauf cosmétique) ───
+        # ─── FORMULAIRE D'ACHAT ───
         def _render_purchase_form(t):
             form_container.clear()
             updating = {'value': False}
@@ -582,9 +582,6 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                 ).style(f'color: {c["text_secondary"]}')
 
                 with ui.row().classes('w-full gap-3'):
-                    # 🆕 Toutes les catégories autorisent des fractions (actions fractionnées,
-                    # ETF, OPCVM, etc.). Format à 4 décimales avec step fin.
-                    is_action = False  # Conservé pour compatibilité downstream
                     quantite_input = ui.number(
                         '🔢 Quantité', value=0,
                         format='%.4f', min=0, step=0.0001
@@ -609,7 +606,6 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                         pass
 
                 def update_qte_from_montant():
-                    """Recalcule la quantité depuis montant ÷ prix (toujours fractionnaire)."""
                     if updating['value']:
                         return
                     try:
@@ -641,14 +637,11 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                 )
 
                 def update_summary():
-                    """Affiche le récap en recalculant TOUJOURS depuis quantité × prix."""
                     try:
                         q = float(quantite_input.value or 0)
                         p = float(prix_input.value or 0)
                         f = float(frais_input.value or 0)
                         cur = t.get('currency', 'EUR')
-
-                        # 🆕 Toujours recalculer m depuis q × p
                         m = round(q * p, 2)
 
                         if cur != 'EUR':
@@ -678,7 +671,10 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                 with ui.row().classes('w-full justify-end gap-2 mt-4'):
                     ui.button('Annuler', on_click=dialog.close).props('flat')
 
-                    def save_achat():
+                    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                    # 🆕 save_achat est maintenant ASYNC
+                    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                    async def save_achat():
                         try:
                             date_val = datetime.strptime(
                                 date_input.value, '%d/%m/%Y'
@@ -693,7 +689,6 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                             ui.notify('Quantité invalide', type='negative')
                             return
 
-                        # Sécurité : pas d'achat de Fonds €
                         if t.get('type') in ('Fonds €', 'Fonds Euro'):
                             ui.notify(
                                 "Un Fonds Euro ne peut pas être 'acheté'. "
@@ -704,8 +699,6 @@ def open_buy_dialog(portefeuille_id, c, refresh):
 
                         q = float(quantite_input.value)
                         p_unit = float(prix_input.value)
-                        # 🆕 Plus de contrainte d'entier : actions fractionnées autorisées
-
                         frais = float(frais_input.value or 0)
 
                         prix_eur = p_unit
@@ -722,6 +715,10 @@ def open_buy_dialog(portefeuille_id, c, refresh):
 
                         montant_titres_eur = q * prix_eur
                         total_eur = montant_titres_eur + frais
+
+                        # ── Phase 1 : commit BDD (rapide) ──
+                        need_backfill = False
+                        ticker_for_backfill = None
 
                         with get_session() as session:
                             fe_pos = None
@@ -848,14 +845,11 @@ def open_buy_dialog(portefeuille_id, c, refresh):
 
                             session.commit()
 
-                        # 🆕 Backfill des cours historiques pour ce ticker
-                        if t.get('source') == 'yahoo' and t.get('symbol'):
-                            from services.backfill import backfill_cours_historique, backfill_valorisations
-                            try:
-                                backfill_cours_historique(portefeuille_id)
-                                backfill_valorisations(portefeuille_id)
-                            except Exception as e:
-                                print(f'⚠️ Backfill échoué après achat: {e}')
+                        # ── Phase 2 : feedback immédiat ──
+                        need_backfill = (
+                            t.get('source') == 'yahoo' and bool(t.get('symbol'))
+                        )
+                        ticker_for_backfill = t.get('symbol')
 
                         ui.notify(
                             f'✅ Achat de {q:g} × {t["name"][:30]} effectué',
@@ -864,7 +858,45 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                         dialog.close()
                         refresh()
 
+                        # ── Phase 3 : backfill en arrière-plan ──
+                        if need_backfill:
+                            asyncio.create_task(
+                                _run_backfill_async(portefeuille_id, refresh)
+                            )
+
                     ui.button("🛒 Confirmer l'achat", on_click=save_achat) \
                         .props('unelevated').classes('bg-emerald-600 text-white')
 
     dialog.open()
+
+
+async def _run_backfill_async(portefeuille_id: int, refresh):
+    """Exécute le backfill dans un thread séparé, puis rafraîchit l'UI."""
+    from services.backfill import backfill_cours_historique, backfill_valorisations
+
+    # Notification discrète de début
+    notif = ui.notification(
+        '📈 Mise à jour de l\'historique en cours...',
+        type='ongoing',
+        spinner=True,
+        timeout=None,
+    )
+
+    try:
+        await asyncio.to_thread(backfill_cours_historique, portefeuille_id)
+        await asyncio.to_thread(backfill_valorisations, portefeuille_id)
+
+        notif.dismiss()
+        ui.notify('📈 Historique mis à jour', type='positive', timeout=3000)
+
+        # Rafraîchir pour mettre à jour le graphique
+        refresh()
+
+    except Exception as e:
+        notif.dismiss()
+        ui.notify(
+            f'⚠️ Mise à jour historique échouée : {e}',
+            type='warning',
+            timeout=5000,
+        )
+        print(f'⚠️ Backfill async échoué pour portefeuille #{portefeuille_id}: {e}')

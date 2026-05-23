@@ -13,11 +13,13 @@ from services.market_data import (
     get_price_at_date_with_currency,
 )
 from pages.portefeuille_detail._cash_helpers import impact_cash, ajuster_cash
-from services.labels import get_display_name  # ✅ Import ajouté
+from services.labels import get_display_name
 
 
 def open_sell_dialog(portefeuille_id, c, refresh):
     """Dialogue de vente d'une position détenue."""
+    # ✅ Capture du contexte client utilisateur d'origine (IHM)
+    client = ui.context.client
 
     with get_session() as session:
         portefeuille = session.get(Portefeuille, portefeuille_id)
@@ -44,18 +46,32 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                 ).order_by(Position.nom)
             ).scalars().all()
 
+        # Snapshot du type portefeuille hors session
+        portefeuille_type = portefeuille.type
+
     if not positions_data:
         ui.notify("Aucune position à vendre dans ce portefeuille", type='warning')
         return
 
-    # ✅ Pré-calcul des noms d'affichage pour chaque position
-    # On enrichit chaque dict avec display_name une seule fois
+    # Pré-calcul des noms d'affichage pour chaque position
     for p in positions_data:
         p['display_name'] = get_display_name(
             ticker=p.get('ticker'),
             code=p.get('code'),
             fallback=p['nom']
         )
+
+    # Snapshot des fonds euro hors session
+    fonds_euro_positions_data = [
+        {
+            'id': f.id,
+            'nom': f.nom,
+            'quantite': f.quantite,
+            'prix_moyen': f.prix_moyen,
+            'categorie': f.categorie,
+        }
+        for f in fonds_euro_positions
+    ]
 
     state = {
         'selected_pos': None,
@@ -75,7 +91,6 @@ def open_sell_dialog(portefeuille_id, c, refresh):
             f'color: {c["text_secondary"]}'
         )
 
-        # ✅ Utilisation de display_name dans la liste déroulante
         pos_options = {
             p['id']: f"{p['display_name']} ({p['quantite']:g} parts à {p['prix_moyen']:.2f}€)"
             for p in positions_data
@@ -113,7 +128,6 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                 ):
                     with ui.row().classes('w-full items-center justify-between'):
                         with ui.column().classes('gap-0'):
-                            # ✅ Utilisation de display_name dans le récap
                             ui.label(pos['display_name']).classes(
                                 'text-base font-bold'
                             ).style(f'color: {c["text_primary"]}')
@@ -149,8 +163,7 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                             ).style(f'color: {c["text_secondary"]}')
                             ui.label(format_money(pos['cours_actuel'] or 0, decimals=2)) \
                                 .classes('text-base font-bold').style(
-                                f'color: {c["text_primary"]}'
-                            )
+                                f'color: {c["text_primary"]}')
 
                 # ── Source du cours ──
                 if pos.get('ticker'):
@@ -204,6 +217,7 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                         "ℹ️ Position manuelle : pas d'auto-remplissage du cours"
                     )
 
+                # ✅ Sécurisation de l'IHM via le contexte client
                 async def update_price_for_date():
                     if price_state['manually_modified']:
                         return
@@ -218,16 +232,19 @@ def open_sell_dialog(portefeuille_id, c, refresh):
 
                     if target_date == date.today():
                         updating['value'] = True
-                        prix_input.value = cours_initial
-                        price_state['last_auto_value'] = cours_initial
+                        with client:
+                            prix_input.value = cours_initial
+                            price_state['last_auto_value'] = cours_initial
                         updating['value'] = False
-                        price_info_label.text = (
-                            f"💹 Cours actuel du marché : {cours_initial:.4f} €"
-                        )
+                        with client:
+                            price_info_label.text = (
+                                f"💹 Cours actuel du marché : {cours_initial:.4f} €"
+                            )
                         update_montant_from_qte()
                         return
 
-                    price_info_label.text = '⏳ Récupération du cours historique...'
+                    with client:
+                        price_info_label.text = '⏳ Récupération du cours historique...'
 
                     try:
                         info = await asyncio.to_thread(
@@ -245,22 +262,26 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                                     price_eur = info['price'] * rate
 
                             updating['value'] = True
-                            prix_input.value = round(price_eur, 4)
-                            price_state['last_auto_value'] = price_eur
+                            with client:
+                                prix_input.value = round(price_eur, 4)
+                                price_state['last_auto_value'] = price_eur
                             updating['value'] = False
-                            price_info_label.text = (
-                                f"💹 Cours du marché au "
-                                f"{target_date.strftime('%d/%m/%Y')} : "
-                                f"{price_eur:.4f} €"
-                            )
+                            with client:
+                                price_info_label.text = (
+                                    f"💹 Cours du marché au "
+                                    f"{target_date.strftime('%d/%m/%Y')} : "
+                                    f"{price_eur:.4f} €"
+                                )
                             update_montant_from_qte()
                         else:
-                            price_info_label.text = (
-                                "⚠️ Cours historique non disponible "
-                                "(saisie manuelle requise)"
-                            )
+                            with client:
+                                price_info_label.text = (
+                                    "⚠️ Cours historique non disponible "
+                                    "(saisie manuelle requise)"
+                                )
                     except Exception as e:
-                        price_info_label.text = f"⚠️ Erreur : {e}"
+                        with client:
+                            price_info_label.text = f"⚠️ Erreur : {e}"
 
                 def on_price_change(e):
                     if updating['value']:
@@ -299,13 +320,13 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                         format='%.2f', min=0
                     ).classes('flex-1')
 
-                if portefeuille.type in ['Assurance-Vie', 'PER']:
+                if portefeuille_type in ['Assurance-Vie', 'PER']:
                     ui.label('Destination du produit de la vente').classes(
                         'text-sm font-medium mt-2'
                     ).style(f'color: {c["text_secondary"]}')
                     fonds_euro_options = {
-                        f.id: f"{f.nom} ({format_money(f.quantite * f.prix_moyen, decimals=2)})"
-                        for f in fonds_euro_positions
+                        f['id']: f"{f['nom']} ({format_money(f['quantite'] * f['prix_moyen'], decimals=2)})"
+                        for f in fonds_euro_positions_data
                     }
                     if fonds_euro_options:
                         fonds_euro_select = ui.select(
@@ -313,9 +334,9 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                             label='Sélectionnez un Fonds Euro de destination *',
                             on_change=lambda e: state.update(selected_fonds_euro_id=e.value)
                         ).classes('w-full')
-                        if fonds_euro_positions:
-                            fonds_euro_select.value = fonds_euro_positions[0].id
-                            state['selected_fonds_euro_id'] = fonds_euro_positions[0].id
+                        if fonds_euro_positions_data:
+                            fonds_euro_select.value = fonds_euro_positions_data[0]['id']
+                            state['selected_fonds_euro_id'] = fonds_euro_positions_data[0]['id']
                     else:
                         ui.label(
                             "⚠️ Aucun Fonds Euro actif pour cet Assurance-Vie/PER."
@@ -411,12 +432,12 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                             f'💰 Net encaissé : {format_money(montant_net, decimals=2)}\n'
                             f'📊 Coût de revient : {format_money(cout_revient, decimals=2)} '
                             f'({q:g} × {format_money(pru, decimals=2)})\n'
-                            f'{pv_emoji} +/- value réalisée : '
+                            f'{"✅" if plus_value >= 0 else "❌"} +/- value réalisée : '
                             f'{format_money(plus_value, decimals=2)} '
                             f'({format_percent(pv_pct)})'
                             f'{warning}'
                         )
-                        if (portefeuille.type in ['Assurance-Vie', 'PER']
+                        if (portefeuille_type in ['Assurance-Vie', 'PER']
                                 and not state['selected_fonds_euro_id']
                                 and (q > 0 or f > 0)):
                             summary_label.text += (
@@ -430,7 +451,7 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                 with ui.row().classes('w-full justify-end gap-2 mt-4'):
                     ui.button('Annuler', on_click=dialog.close).props('flat')
 
-                    def save_vente():
+                    async def save_vente():
                         try:
                             date_val = datetime.strptime(
                                 date_input.value, '%d/%m/%Y'
@@ -456,7 +477,7 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                             )
                             return
 
-                        if (portefeuille.type in ['Assurance-Vie', 'PER']
+                        if (portefeuille_type in ['Assurance-Vie', 'PER']
                                 and not state['selected_fonds_euro_id']):
                             ui.notify(
                                 'Veuillez sélectionner un Fonds Euro de destination.',
@@ -466,6 +487,9 @@ def open_sell_dialog(portefeuille_id, c, refresh):
 
                         montant_brut = q * p_unit
                         montant_net = montant_brut - frais
+
+                        # ── Phase 1 : commit BDD (rapide) ──
+                        need_backfill = False
 
                         with get_session() as session:
                             position = session.get(Position, pos['id'])
@@ -479,7 +503,6 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                             else:
                                 position.quantite = new_qty
 
-                            # ✅ Libellé transaction : on garde pos['nom'] (snapshot historique)
                             tx_vente = Transaction(
                                 portefeuille_id=portefeuille_id,
                                 date_operation=date_val,
@@ -496,7 +519,7 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                             session.add(tx_vente)
                             session.flush()
 
-                            if portefeuille.type in ['Assurance-Vie', 'PER']:
+                            if portefeuille_type in ['Assurance-Vie', 'PER']:
                                 fonds_euro_cible = session.get(
                                     Position, state['selected_fonds_euro_id']
                                 )
@@ -578,22 +601,13 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                                     )
 
                             session.commit()
+                            need_backfill = bool(pos.get('ticker'))
 
-                        try:
-                            from services.backfill import (
-                                backfill_cours_historique, backfill_valorisations
-                            )
-                            if pos.get('ticker'):
-                                backfill_cours_historique(portefeuille_id)
-                            backfill_valorisations(portefeuille_id)
-                        except Exception as e:
-                            print(f'⚠️ Backfill échoué après vente : {e}')
-
+                        # ── Phase 2 : feedback immédiat ──
                         cout = q * pos['prix_moyen']
                         pv = montant_net - cout
-                        pv_emoji = '✅' if pv >= 0 else '❌'
                         ui.notify(
-                            f'{pv_emoji} Vente effectuée. '
+                            f'{"✅" if pv >= 0 else "❌"} Vente effectuée. '
                             f'+/- value : {format_money(pv, decimals=2)}',
                             type='positive' if pv >= 0 else 'warning',
                             timeout=4000
@@ -601,7 +615,56 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                         dialog.close()
                         refresh()
 
+                        # ── Phase 3 : backfill en arrière-plan (sécurisé avec le client) ──
+                        asyncio.create_task(
+                            _run_backfill_async(
+                                portefeuille_id,
+                                refresh,
+                                client,            # ✅ Transmission du contexte client
+                                need_backfill,
+                            )
+                        )
+
                     ui.button("💹 Confirmer la vente", on_click=save_vente) \
                         .props('unelevated').classes('bg-pink-600 text-white')
 
     dialog.open()
+
+
+# ✅ Ajout du paramètre 'client' pour l'exécution threadée asynchrone sécurisée
+async def _run_backfill_async(portefeuille_id: int, refresh, client, need_cours: bool = True):
+    """Exécute le backfill dans un thread séparé, puis rafraîchit l'UI sans erreur de slot."""
+    from services.backfill import backfill_cours_historique, backfill_valorisations
+
+    # ✅ On entre dans le contexte du client utilisateur pour afficher la notification de départ
+    with client:
+        notif = ui.notification(
+            "📈 Mise à jour de l'historique en cours...",
+            type='ongoing',
+            spinner=True,
+            timeout=None,
+        )
+
+    try:
+        # backfill_cours uniquement si la position avait un ticker Yahoo
+        if need_cours:
+            await asyncio.to_thread(backfill_cours_historique, portefeuille_id)
+
+        await asyncio.to_thread(backfill_valorisations, portefeuille_id)
+
+        # ✅ Une fois terminé, on ré-entre dans le contexte client pour modifier l'IHM
+        with client:
+            notif.dismiss()
+            ui.notify('📈 Historique mis à jour', type='positive', timeout=3000)
+            refresh()
+
+    except Exception as e:
+        # ✅ Gestion des erreurs sous contexte client
+        with client:
+            notif.dismiss()
+            ui.notify(
+                f'⚠️ Mise à jour historique échouée : {e}',
+                type='warning',
+                timeout=5000,
+            )
+        print(f'⚠️ Backfill async échoué pour portefeuille #{portefeuille_id}: {e}')

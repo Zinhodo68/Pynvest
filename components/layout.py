@@ -4,7 +4,6 @@ from components.header import create_header
 from components.sidebar import create_sidebar
 from components.refresh import clear_callbacks
 
-
 def page_layout(active_route: str = '/'):
     # Important : nettoyer les callbacks de la page précédente
     clear_callbacks()

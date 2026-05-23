@@ -17,8 +17,8 @@ def render_positions_section(positions, data, c, portefeuille_id, refresh, is_da
         f'background-color: {c["card_bg"]}; '
         f'border: 1px solid {c["card_border"]};'
     ):
-        # Header
-        with ui.row().classes('w-full items-center justify-between p-5').style(
+        # Header (réduit en hauteur)
+        with ui.row().classes('w-full items-center justify-between px-5 py-3').style(
             f'border-bottom: 1px solid {c["card_border"]};'
         ):
             with ui.column().classes('gap-0'):
@@ -70,13 +70,12 @@ def render_positions_section(positions, data, c, portefeuille_id, refresh, is_da
         total_pru = sum(p['prix_revient'] for p in positions)
         total_pv = total_valo - total_pru
 
-        # En-tête tableau
-        with ui.row().classes('w-full px-5 py-3 text-xs font-semibold uppercase tracking-wider').style(
+        # En-tête tableau (réduit en hauteur, colonne Catégorie supprimée)
+        with ui.row().classes('w-full px-5 py-1.5 text-xs font-semibold uppercase tracking-wider').style(
             f'color: {c["text_secondary"]}; '
             f'background-color: {c["card_border"]}30;'
         ):
             ui.label('Titre').style('flex: 2;')
-            ui.label('Catégorie').style('width: 110px;')
             ui.label('Quantité').style('width: 90px; text-align: right;')
             ui.label('PRU').style('width: 100px; text-align: right;')
             ui.label('Cours').style('width: 100px; text-align: right;')
@@ -93,21 +92,24 @@ def render_positions_section(positions, data, c, portefeuille_id, refresh, is_da
         titres = [p for p in positions if not is_reserve(p)]
         reserves = [p for p in positions if is_reserve(p)]
 
-        for pos in titres:
-            _render_position_row(pos, c, portefeuille_id, refresh)
+        # 3. Limitation de hauteur avec défilement interne pour les lignes de données
+        with ui.column().classes('w-full max-h-[350px] overflow-y-auto gap-0'):
+            for pos in titres:
+                _render_position_row(pos, c, portefeuille_id, refresh)
 
-        if titres and reserves:
-            with ui.row().classes('w-full px-5 py-2 items-center').style(
-                f'border-top: 2px dashed {c["card_border"]}; '
-                f'background-color: {c["card_border"]}15;'
-            ):
-                ui.label('💰 Réserves de liquidités').classes(
-                    'text-xs font-semibold uppercase tracking-wider'
-                ).style(f'color: {c["text_secondary"]};')
+            if titres and reserves:
+                with ui.row().classes('w-full px-5 py-1 items-center').style(
+                    f'border-top: 2px dashed {c["card_border"]}; '
+                    f'background-color: {c["card_border"]}15;'
+                ):
+                    ui.label('💰 Réserves de liquidités').classes(
+                        'text-xs font-semibold uppercase tracking-wider'
+                    ).style(f'color: {c["text_secondary"]};')
 
-        for pos in reserves:
-            _render_position_row(pos, c, portefeuille_id, refresh)
+            for pos in reserves:
+                _render_position_row(pos, c, portefeuille_id, refresh)
 
+        # Pied de page fixe
         _render_positions_footer(total_pru, total_valo, total_pv, c)
 
 
@@ -220,7 +222,8 @@ def _render_position_row(pos, c, portefeuille_id, refresh):
         fallback=pos['nom']
     ) if not is_cash else 'Cash'
 
-    with ui.row().classes('w-full px-5 py-3 items-center').style(
+    # Hauteur de ligne réduite à py-1.5 au lieu de py-3
+    with ui.row().classes('w-full px-5 py-1.5 items-center').style(
         f'border-top: 1px solid {c["card_border"]};'
         + (f' background-color: {cat_info["couleur"]}10;' if is_cash else '')
     ):
@@ -248,15 +251,7 @@ def _render_position_row(pos, c, portefeuille_id, refresh):
                     f'color: {c["text_secondary"]}'
                 )
 
-        # Colonne Catégorie
-        with ui.row().classes('items-center gap-1').style('width: 110px;'):
-            if not is_cash:
-                ui.icon(cat_info['icon']).classes('text-sm').style(
-                    f'color: {cat_info["couleur"]}'
-                )
-            ui.label(pos['categorie'] or '—').classes('text-xs').style(
-                f'color: {cat_info["couleur"]}; font-weight: 500;'
-            )
+        # La colonne "Catégorie" a été complètement retirée ici pour libérer de la place
 
         # Quantité
         ui.label(f'{pos["quantite"]:g}'.replace('.', ',') if not is_cash else '—') \
@@ -317,14 +312,15 @@ def _render_position_row(pos, c, portefeuille_id, refresh):
 
 def _render_positions_footer(total_pru, total_valo, total_pv, c):
     total_color = get_perf_color(total_pv)
-    with ui.row().classes('w-full px-5 py-3 items-center').style(
+    # Hauteur de ligne réduite à py-1.5 au lieu de py-3
+    with ui.row().classes('w-full px-5 py-1.5 items-center').style(
         f'border-top: 2px solid {c["card_border"]}; '
         f'background-color: {c["card_border"]}20;'
     ):
         ui.label('TOTAL POSITIONS').classes('text-xs font-bold tracking-wider').style(
             f'color: {c["text_secondary"]}; flex: 2;'
         )
-        ui.label('').style('width: 110px;')
+        # La colonne Catégorie vide (width: 110px) a été retirée pour préserver l'alignement
         ui.label('').style('width: 90px;')
         ui.label('').style('width: 100px;')
         ui.label(format_money(total_pru, decimals=2)).classes('text-sm').style(

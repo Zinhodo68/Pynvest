@@ -6,28 +6,35 @@ from nicegui import ui, app
 from database.db import init_db
 init_db()
 
-# ✨ Mise à jour des cours au démarrage (en arrière-plan)
-def _startup_update_quotes():
-    """Job au démarrage : met à jour les cours si pas fait aujourd'hui."""
-    try:
-        from services.quotes_updater import update_all_quotes
-        update_all_quotes(force=False)
-    except Exception as e:
-        print(f'❌ Erreur MAJ cours au démarrage : {e}')
-
-# Lance la MAJ en arrière-plan (non bloquant)
-import threading
-threading.Thread(target=_startup_update_quotes, daemon=True).start()
-
 # Dossier uploads exposé en statique
 UPLOADS_DIR = Path(__file__).parent / 'uploads' / 'logos'
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 app.add_static_files('/uploads', str(UPLOADS_DIR.parent))
 
 # Imports des pages
-from pages import dashboard, portfolios, famille, portefeuille_detail  # ✅ ajouté
+from pages import dashboard, portfolios, famille, portefeuille_detail
 from components.layout import page_layout
 from theme import get_colors
+
+
+# ✅ Tâche de démarrage propre via app.on_startup
+# Complètement découplée de tout contexte de page NiceGUI
+# Pas de ui.notify() ici → uniquement des logs console
+async def _startup_update_quotes():
+    """
+    Met à jour les cours au démarrage si pas fait aujourd'hui.
+    Tourne dans la boucle asyncio de NiceGUI, sans contexte de page.
+    """
+    try:
+        from nicegui import run
+        from services.quotes_updater import update_all_quotes
+        stats = await run.io_bound(update_all_quotes, False)
+        print(f'✅ MAJ cours au démarrage terminée : {stats}')
+    except Exception as e:
+        print(f'❌ Erreur MAJ cours au démarrage : {e}')
+
+
+app.on_startup(_startup_update_quotes)
 
 
 @ui.page('/')
@@ -45,7 +52,6 @@ def portefeuille_member(member: str):
     portfolios.render(member)
 
 
-# ✅ NOUVELLE ROUTE pour la page détail
 @ui.page('/portefeuille/{pid}')
 def portefeuille_detail_page(pid: int):
     portefeuille_detail.render(pid)

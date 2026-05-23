@@ -128,47 +128,6 @@ def get_yahoo_history(symbol: str, start_date, end_date=None) -> list[dict]:
 
 
 def get_yahoo_price_at_date(symbol: str, target_date) -> dict:
-    """Récupère le cours d'un titre à une date donnée.
-
-    Si la date demandée n'a pas de cours (week-end, férié),
-    retourne le dernier cours connu avant.
-    """
-    try:
-        from datetime import timedelta
-        ticker = yf.Ticker(symbol)
-        # On télécharge une fenêtre de 7 jours autour pour gérer week-ends/fériés
-        start = target_date - timedelta(days=7)
-        end = target_date + timedelta(days=1)
-        hist = ticker.history(
-            start=start.isoformat(),
-            end=end.isoformat(),
-            auto_adjust=True,
-        )
-        if hist.empty:
-            return {'price': None, 'currency': 'USD'}
-
-        # On prend la dernière ligne <= target_date
-        target_ts = datetime.combine(target_date, datetime.min.time())
-        valid_rows = hist[hist.index.date <= target_date]
-        if valid_rows.empty:
-            return {'price': None, 'currency': 'USD'}
-
-        last_row = valid_rows.iloc[-1]
-        try:
-            currency = ticker.fast_info.get('currency', 'USD')
-        except Exception:
-            currency = 'USD'
-
-        return {
-            'price': float(last_row['Close']),
-            'currency': currency,
-        }
-    except Exception as e:
-        print(f'Erreur get_yahoo_price_at_date {symbol}: {e}')
-        return {'price': None, 'currency': 'USD'}
-
-
-def get_yahoo_price_at_date(symbol: str, target_date) -> dict:
     """Récupère le cours de clôture d'un titre à une date donnée.
 
     Si la date est un week-end ou jour férié, retourne le dernier cours

@@ -1,26 +1,31 @@
 """Reconstruit l'historique des valorisations à partir des transactions.
 
-Logique de calcul :
-- Pour chaque jour depuis la première transaction :
-  - On rejoue toutes les transactions jusqu'à ce jour
-  - On calcule les positions détenues (par ticker/code)
-  - On valorise chaque position au cours du jour
-  - On ajoute le cash résiduel
+Logique de calcul optimisée :
+- Téléchargement incrémental des cours Yahoo (jours manquants uniquement)
+- Requêtes HTTP effectuées hors session de base de données (non bloquant pour SQLite)
+- Calcul de valorisation journalier en O(1) amorti par pointeurs chronologiques
+- Nettoyage des positions soldées (tolérance float epsilon)
 """
 from datetime import date, timedelta
 from collections import defaultdict
-from sqlalchemy import select
+import math
+import re
+from sqlalchemy import select, func
 
 from database.db import get_session
 from database.models import Portefeuille, Valorisation, CoursHistorique, Transaction
 from services._yahoo import get_yahoo_history, get_currency_rate
 
+# ✅ Seuls ces types d'opérations enfant constituent un vrai arbitrage interne
+ARBITRAGE_CHILD_TYPES = {'achat', 'vente', 'versement', 'retrait'}
+
 
 def backfill_cours_historique(portefeuille_id: int) -> int:
-    """Télécharge l'historique Yahoo pour les tickers présents dans les transactions."""
-    import math
-    import re
+    """Télécharge l'historique Yahoo uniquement pour les jours manquants."""
+    ISIN_PATTERN = re.compile(r'^[A-Z]{2}[A-Z0-9]{9}\d$')
+    VALID_TICKER_PATTERN = re.compile(r'^[A-Z0-9][A-Z0-9.\-=^]{0,14}$')
 
+    # 1. Étape rapide sous BDD pour lister les besoins (sans bloquer SQLite longuement)
     with get_session() as session:
         p = session.get(Portefeuille, portefeuille_id)
         if not p or not p.transactions:
@@ -31,21 +36,14 @@ def backfill_cours_historique(portefeuille_id: int) -> int:
             print('   ℹ️  Aucun achat enregistré')
             return 0
 
-        start_date = min(t.date_operation for t in achats)
-        end_date = date.today()
-        total_inserted = 0
+        first_purchase_date = min(t.date_operation for t in achats)
 
-        # 🛡️ Filtrage des faux tickers
-        ISIN_PATTERN = re.compile(r'^[A-Z]{2}[A-Z0-9]{9}\d$')
-        VALID_TICKER_PATTERN = re.compile(r'^[A-Z0-9][A-Z0-9.\-=^]{0,14}$')
-
+        # Filtrage et identification des tickers uniques
         tickers = set()
         for t in p.transactions:
             if t.type_operation in ('achat', 'vente') and t.ticker:
                 ticker = t.ticker.strip()
-                if ISIN_PATTERN.match(ticker):
-                    continue
-                if not VALID_TICKER_PATTERN.match(ticker):
+                if ISIN_PATTERN.match(ticker) or not VALID_TICKER_PATTERN.match(ticker):
                     continue
                 tickers.add(ticker)
 
@@ -53,68 +51,113 @@ def backfill_cours_historique(portefeuille_id: int) -> int:
             print('   ⚠️ Aucun ticker Yahoo valide dans les transactions')
             return 0
 
-        print(f'   📥 Téléchargement historique pour {len(tickers)} ticker(s)')
-
+        # Pour chaque actif, on détermine à partir de quand télécharger
+        ticker_start_dates = {}
         for ticker in tickers:
-            existing_dates = set(
-                row[0] for row in session.execute(
-                    select(CoursHistorique.date_cours)
-                    .where(CoursHistorique.ticker == ticker)
+            # Récupération de la date du dernier cours connu en BDD
+            max_date = session.execute(
+                select(func.max(CoursHistorique.date_cours))
+                .where(CoursHistorique.ticker == ticker)
+            ).scalar()
+
+            if max_date:
+                # Si on a déjà des cours, on reprend au lendemain du dernier cours connu
+                ticker_start_dates[ticker] = max_date + timedelta(days=1)
+            else:
+                # Sinon, on prend la date du tout premier achat historique du portefeuille
+                ticker_start_dates[ticker] = first_purchase_date
+
+    # 2. Requêtes réseau hors session de base de données (sécurisé et non bloquant)
+    end_date = date.today()
+    all_history_to_insert = []
+
+    for ticker, start_date in ticker_start_dates.items():
+        if start_date >= end_date:
+            print(f'   ℹ️  {ticker}: Déjà à jour (dernier cours en BDD le {start_date - timedelta(days=1)})')
+            continue
+
+        print(f'   📥 Téléchargement pour {ticker} du {start_date} au {end_date}')
+        history = get_yahoo_history(ticker, start_date, end_date)
+        if not history:
+            print(f'   ⚠️ Aucun historique récupéré pour {ticker}')
+            continue
+
+        currency = history[0].get('currency', 'EUR')
+        rate = 1.0
+        if currency != 'EUR':
+            rate = get_currency_rate(currency, 'EUR') or 1.0
+
+        for h in history:
+            cours_eur = h['cours'] * rate
+            if math.isnan(cours_eur) or math.isinf(cours_eur) or cours_eur <= 0:
+                continue
+
+            all_history_to_insert.append({
+                'ticker': ticker,
+                'date_cours': h['date'],
+                'cours': cours_eur
+            })
+
+    # 3. Insertion en base de données par lot
+    total_inserted = 0
+    if all_history_to_insert:
+        with get_session() as session:
+            # Récupération en une seule requête de tous les doublons potentiels
+            existing_entries = set(
+                session.execute(
+                    select(CoursHistorique.ticker, CoursHistorique.date_cours)
+                    .where(CoursHistorique.ticker.in_(tickers))
                 ).all()
             )
 
-            history = get_yahoo_history(ticker, start_date, end_date)
-            if not history:
-                print(f'   ⚠️ Aucun historique récupéré pour {ticker}')
-                continue
+            for item in all_history_to_insert:
+                if (item['ticker'], item['date_cours']) not in existing_entries:
+                    session.add(CoursHistorique(
+                        ticker=item['ticker'],
+                        isin=None,
+                        date_cours=item['date_cours'],
+                        cours=item['cours'],
+                        devise='EUR',
+                        source='yahoo_backfill',
+                    ))
+                    total_inserted += 1
 
-            currency = history[0]['currency']
-            rate = 1.0
-            if currency != 'EUR':
-                rate = get_currency_rate(currency, 'EUR') or 1.0
-
-            inserted = 0
-            for h in history:
-                if h['date'] in existing_dates:
-                    continue
-
-                cours_eur = h['cours'] * rate
-                # 🛡️ Double sécurité : ne jamais insérer NaN/inf
-                if math.isnan(cours_eur) or math.isinf(cours_eur) or cours_eur <= 0:
-                    continue
-
-                session.add(CoursHistorique(
-                    ticker=ticker,
-                    isin=None,
-                    date_cours=h['date'],
-                    cours=cours_eur,
-                    devise='EUR',
-                    source='yahoo_backfill',
-                ))
-                inserted += 1
-
-            print(f'   ✅ {ticker}: {inserted} cours insérés')
-            total_inserted += inserted
-
-            # 🆕 Commit incrémental ticker par ticker
             try:
                 session.commit()
+                print(f'   ✅ Fin d\'insertion : {total_inserted} cours ajoutés en BDD')
             except Exception as e:
-                print(f'   ❌ Commit échoué pour {ticker}: {e}')
+                print(f'   ❌ Échec de la sauvegarde des cours historiques : {e}')
                 session.rollback()
 
-        return total_inserted
+    return total_inserted
+
+
+def _build_arbitrage_parent_ids(transactions: list) -> set:
+    """Identifie les IDs de transactions qui sont des VRAIS parents d'arbitrage.
+
+    Un parent est un arbitrage interne UNIQUEMENT si son enfant est de type
+    achat/vente/versement/retrait (= transfert entre actifs).
+    """
+    arbitrage_parent_ids = set()
+    for t in transactions:
+        if t.parent_transaction_id is not None:
+            if t.type_operation in ARBITRAGE_CHILD_TYPES:
+                arbitrage_parent_ids.add(t.parent_transaction_id)
+    return arbitrage_parent_ids
+
+
+def _is_arbitrage_internal(t, arbitrage_parent_ids: set) -> bool:
+    """Détermine si une transaction est partie d'un arbitrage interne."""
+    is_arb_child = (
+        t.parent_transaction_id is not None
+        and t.type_operation in ARBITRAGE_CHILD_TYPES
+    )
+    is_arb_parent = t.id in arbitrage_parent_ids
+    return is_arb_child or is_arb_parent
 
 
 def backfill_valorisations(portefeuille_id: int) -> int:
-    """Reconstruit les snapshots quotidiens en rejouant les transactions.
-
-    Règles arbitrages internes :
-    - Une transaction est "interne" si elle a un parent OU si elle est parente.
-    - Pour les achats/ventes/versements/retraits internes : NE PAS toucher au cash.
-      Seules les positions/quantités évoluent (transfert pur entre actifs).
-    - Pour les versements/retraits externes (sans lien parent/enfant) : impacter le cash.
-    """
+    """Reconstruit les snapshots quotidiens en rejouant les transactions."""
     with get_session() as session:
         p = session.get(Portefeuille, portefeuille_id)
         if not p or not p.transactions:
@@ -130,13 +173,9 @@ def backfill_valorisations(portefeuille_id: int) -> int:
         start_date = transactions[0].date_operation
         end_date = date.today()
 
-        # 🆕 Précalcul : IDs des transactions qui ont un enfant (= parents d'arbitrage)
-        parent_ids_with_child = {
-            t.parent_transaction_id for t in transactions
-            if t.parent_transaction_id is not None
-        }
+        arbitrage_parent_ids = _build_arbitrage_parent_ids(transactions)
 
-        # Charger l'historique des cours pour tous les tickers présents dans les transactions
+        # Charger l'historique des cours depuis la BDD locale
         tickers = set()
         for t in transactions:
             if t.type_operation in ('achat', 'vente') and t.ticker:
@@ -154,16 +193,26 @@ def backfill_valorisations(portefeuille_id: int) -> int:
             for ticker, d, cours in cours_rows:
                 cours_par_ticker[ticker].append((d, cours))
 
+        # Initialisation des index pour la recherche chronologique en O(1) amorti
+        cours_index_pointers = {ticker: 0 for ticker in tickers}
+
         def get_cours_a_date(ticker: str, target: date):
-            """Dernier cours connu à une date donnée (forward-fill)."""
+            """Dernier cours connu à une date donnée (forward-fill en O(1))."""
             cours_list = cours_par_ticker.get(ticker, [])
-            last = None
-            for d, c in cours_list:
-                if d <= target:
-                    last = c
-                else:
-                    break
-            return last
+            if not cours_list:
+                return None
+
+            idx = cours_index_pointers[ticker]
+            # On avance le pointeur de cours tant qu'il est inférieur ou égal à la date cible
+            while idx < len(cours_list) and cours_list[idx][0] <= target:
+                idx += 1
+
+            cours_index_pointers[ticker] = idx
+
+            # Si le pointeur a bougé, la valeur précédente est le dernier cours à jour
+            if idx > 0:
+                return cours_list[idx - 1][1]
+            return None
 
         created = 0
         cash = 0.0
@@ -177,17 +226,13 @@ def backfill_valorisations(portefeuille_id: int) -> int:
 
                 key = t.ticker or t.code or t.nom_titre
                 is_asset_specific_tx = bool(key and t.quantite is not None)
-                is_arbitrage_child = t.parent_transaction_id is not None
-                is_arbitrage_parent = t.id in parent_ids_with_child
-                # 🛡️ Une tx est "interne" si elle est parent OU enfant d'arbitrage
-                is_internal = is_arbitrage_child or is_arbitrage_parent
+                is_internal = _is_arbitrage_internal(t, arbitrage_parent_ids)
 
                 # ─────────────────────────────────────────────
                 # VERSEMENT
                 # ─────────────────────────────────────────────
                 if t.type_operation == 'versement':
                     if is_asset_specific_tx:
-                        # Versement vers un actif (Fonds €)
                         if key in positions_held:
                             positions_held[key]['quantite'] += t.quantite
                         else:
@@ -198,11 +243,9 @@ def backfill_valorisations(portefeuille_id: int) -> int:
                                 'nom': t.nom_titre,
                                 'categorie': t.categorie,
                             }
-                        # Cash : NE PAS toucher (que ce soit versement initial sur Fonds €
-                        # ou arbitrage IN — dans les deux cas le cash n'est pas concerné)
                     else:
-                        # Vrai apport externe d'argent en cash
-                        cash += t.montant
+                        if not is_internal:
+                            cash += t.montant
 
                 # ─────────────────────────────────────────────
                 # RETRAIT
@@ -211,9 +254,9 @@ def backfill_valorisations(portefeuille_id: int) -> int:
                     if is_asset_specific_tx:
                         if key in positions_held:
                             positions_held[key]['quantite'] -= t.quantite
-                        # Cash inchangé
                     else:
-                        cash -= t.montant
+                        if not is_internal:
+                            cash -= t.montant
 
                 # ─────────────────────────────────────────────
                 # INTÉRÊTS (Fonds €)
@@ -272,9 +315,9 @@ def backfill_valorisations(portefeuille_id: int) -> int:
                 # ACHAT
                 # ─────────────────────────────────────────────
                 elif t.type_operation == 'achat':
-                    # 🛡️ Arbitrage interne : l'argent vient d'un Fonds € (pas du cash)
                     if not is_internal:
                         cash -= t.montant
+
                     if t.quantite is not None and t.prix_unitaire is not None:
                         if key in positions_held:
                             old = positions_held[key]
@@ -298,11 +341,15 @@ def backfill_valorisations(portefeuille_id: int) -> int:
                 # VENTE
                 # ─────────────────────────────────────────────
                 elif t.type_operation == 'vente':
-                    # 🛡️ Arbitrage interne : l'argent va vers un Fonds € (pas vers le cash)
                     if not is_internal:
                         cash += t.montant
+
                     if t.quantite is not None and key in positions_held:
                         positions_held[key]['quantite'] -= t.quantite
+
+                # ✅ NETTOYAGE : Supprime la ligne si la quantité détenue devient nulle (seuil d'arrondi)
+                if key in positions_held and positions_held[key]['quantite'] <= 1e-9:
+                    del positions_held[key]
 
                 tx_index += 1
 
@@ -336,8 +383,14 @@ def backfill_valorisations(portefeuille_id: int) -> int:
 
             current_date += timedelta(days=1)
 
-        session.commit()
+        try:
+            session.commit()
+        except Exception as e:
+            print(f'   ❌ Échec de la sauvegarde du backfill valorisation : {e}')
+            session.rollback()
+
         return created
+
 
 def backfill_portefeuille(portefeuille_id: int) -> dict:
     """Lance le backfill complet : cours historiques + valorisations."""

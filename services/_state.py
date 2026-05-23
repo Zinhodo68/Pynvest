@@ -1,10 +1,14 @@
-"""Gestion d'un état persistant (date dernière MAJ des cours, etc.)."""
+"""Gestion d'un état persistant (date dernière MAJ des cours, etc.) et de l'état UI (filtres)."""
 import json
 from datetime import date, datetime
 from pathlib import Path
 
 STATE_FILE = Path(__file__).parent.parent / 'app_state.json'
 
+
+# ─────────────────────────────────────────────
+# 1. ÉTAT PERSISTANT (JSON - MAJ des cours)
+# ─────────────────────────────────────────────
 
 def _load_state() -> dict:
     if not STATE_FILE.exists():
@@ -50,3 +54,47 @@ def is_update_needed() -> bool:
     if last is None:
         return True
     return last < date.today()
+
+
+# ─────────────────────────────────────────────
+# 2. ÉTAT UI VOLATILE (Filtres des Portefeuilles)
+# ─────────────────────────────────────────────
+
+class PortfolioFilterState:
+    def __init__(self):
+        self.selected = set()
+        self.membres_avec_pf = set()
+
+        # Stockage des fonctions de rafraîchissement des différentes pages/composants
+        self.dashboard_refresh = None
+        self.header_refresh = None
+
+    def toggle(self, m_id):
+        # On ne fait rien si le membre cliqué n'a aucun portefeuille
+        if m_id not in self.membres_avec_pf:
+            return
+
+        # Logique de sélection/désélection (Switch)
+        if m_id in self.selected:
+            # On empêche de tout décocher (garde au moins 1)
+            if len(self.selected) > 1:
+                self.selected.remove(m_id)
+        else:
+            self.selected.add(m_id)
+
+        # On déclenche la mise à jour visuelle du Header ET de la page Portefeuilles
+        if self.header_refresh:
+            try:
+                self.header_refresh()
+            except Exception:
+                pass
+
+        if self.dashboard_refresh:
+            try:
+                self.dashboard_refresh()
+            except Exception:
+                pass
+
+
+# Instance unique (Singleton) importable partout dans l'application
+portfolio_state = PortfolioFilterState()

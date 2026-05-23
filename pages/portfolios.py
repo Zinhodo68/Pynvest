@@ -14,7 +14,6 @@ from pages.portefeuilles_data import TYPES_PORTEFEUILLE, get_type_info
 
 from utils.formatters import format_money, format_percent, format_date_fr, get_perf_color
 
-
 UPLOADS_DIR = Path(__file__).parent.parent / 'uploads' / 'logos'
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -69,7 +68,7 @@ def _render_content(c, is_dark, refresh, membre_data, member_param):
                     ui.label('Tous les portefeuilles').classes('text-2xl font-bold').style(
                         f'color: {c["text_primary"]}'
                     )
-                    ui.label('Vue d\'ensemble de tous les portefeuilles familiaux.') \
+                    ui.label("Vue d'ensemble de tous les portefeuilles familiaux.") \
                         .style(f'color: {c["text_secondary"]}')
 
         ui.button(
@@ -80,12 +79,28 @@ def _render_content(c, is_dark, refresh, membre_data, member_param):
             )
         ).props('unelevated').classes('bg-blue-600 text-white')
 
-    # Récupération des portefeuilles
+    # ──────────────────────────────────────────────────────────────────
+    # Récupération des portefeuilles + stats pré-calculées
+    # ⚡ 1 requête SQL agrégée au lieu de ~4N lazy-loads
+    # ──────────────────────────────────────────────────────────────────
     with get_session() as session:
-        stmt = select(Portefeuille).order_by(Portefeuille.id)
+        from sqlalchemy.orm import selectinload
+        from services.portfolio_stats import preload_stats
+
+        stmt = (
+            select(Portefeuille)
+            .options(selectinload(Portefeuille.proprietaire))
+            .order_by(Portefeuille.id)
+        )
         if membre_data:
             stmt = stmt.where(Portefeuille.proprietaire_id == membre_data['id'])
+
         portefeuilles = session.execute(stmt).scalars().all()
+
+        # ⚡ Pré-charge valorisation, total_verse, nb_transactions en 1 query
+        preload_stats(session, portefeuilles)
+
+        # to_dict() utilise le cache → 0 lazy-load
         portefeuilles_data = [p.to_dict() for p in portefeuilles]
 
     if not portefeuilles_data:
@@ -114,7 +129,7 @@ def _render_content(c, is_dark, refresh, membre_data, member_param):
 
 
 # ─────────────────────────────────────────────
-# Carte portefeuille
+# KPIs globaux
 # ─────────────────────────────────────────────
 
 def _render_kpi_bandeau(portefeuilles_data, c, is_dark):
@@ -149,6 +164,10 @@ def _render_kpi_bandeau(portefeuilles_data, c, is_dark):
                 ui.label(value).classes('text-lg font-bold').style(f'color: {color}')
 
 
+# ─────────────────────────────────────────────
+# Carte portefeuille
+# ─────────────────────────────────────────────
+
 def _render_portefeuille_card(p, c, is_dark, refresh):
     type_info = get_type_info(p['type'])
     accent_color = type_info['couleur']
@@ -164,7 +183,7 @@ def _render_portefeuille_card(p, c, is_dark, refresh):
         f'width: 340px; '
         f'transition: transform 0.15s, box-shadow 0.15s;'
     ).on('mouseenter', lambda card=None: None) \
-            .on('click', lambda pid=p['id']: ui.navigate.to(f'/portefeuille/{pid}')):
+     .on('click', lambda pid=p['id']: ui.navigate.to(f'/portefeuille/{pid}')):
 
         # Bandeau coloré + actions
         with ui.element('div').classes('w-full px-5 py-3').style(
@@ -177,7 +196,7 @@ def _render_portefeuille_card(p, c, is_dark, refresh):
                         'text-white text-xs font-bold tracking-wider uppercase'
                     )
 
-                # Menu actions (stoppe la propagation pour ne pas naviguer)
+                # Menu actions
                 menu_btn = ui.button(icon='more_vert').props(
                     'flat round dense size=sm'
                 ).style('color: white;')
@@ -187,23 +206,23 @@ def _render_portefeuille_card(p, c, is_dark, refresh):
                         ui.menu_item(
                             'Voir le détail',
                             on_click=lambda pid=p['id']:
-                                ui.navigate.to(f'/portefeuille/{pid}')
+                            ui.navigate.to(f'/portefeuille/{pid}')
                         )
                         if p['url_gestion']:
                             ui.menu_item(
                                 'Ouvrir le site',
                                 on_click=lambda url=p['url_gestion']:
-                                    ui.navigate.to(url, new_tab=True)
+                                ui.navigate.to(url, new_tab=True)
                             )
                         ui.menu_item(
                             'Modifier',
                             on_click=lambda pid=p['id']:
-                                _open_dialog(c, refresh, portefeuille_id=pid)
+                            _open_dialog(c, refresh, portefeuille_id=pid)
                         )
                         ui.menu_item(
                             'Supprimer',
                             on_click=lambda pid=p['id'], name=p['nom_affiche']:
-                                _confirm_delete(pid, name, refresh)
+                            _confirm_delete(pid, name, refresh)
                         )
 
         # ─── Corps : logo + établissement + propriétaire ───
@@ -231,9 +250,9 @@ def _render_portefeuille_card(p, c, is_dark, refresh):
                 with ui.column().classes('gap-0').style('flex: 1; min-width: 0;'):
                     ui.label(p['etablissement'] or 'Sans établissement') \
                         .classes('font-semibold').style(
-                            f'color: {c["text_primary"]}; '
-                            f'overflow: hidden; text-overflow: ellipsis; white-space: nowrap;'
-                        )
+                        f'color: {c["text_primary"]}; '
+                        f'overflow: hidden; text-overflow: ellipsis; white-space: nowrap;'
+                    )
                     if p['date_creation']:
                         ui.label(f'Ouvert le {format_date_fr(p["date_creation"])}') \
                             .classes('text-xs').style(f'color: {c["text_secondary"]}')
@@ -267,8 +286,8 @@ def _render_portefeuille_card(p, c, is_dark, refresh):
                     ).classes('text-sm font-semibold').style(f'color: {perf_color}')
                     ui.label(format_percent(p['rendement_total_pct'])) \
                         .classes('text-sm font-semibold px-2 py-0.5 rounded').style(
-                            f'background-color: {perf_color}20; color: {perf_color};'
-                        )
+                        f'background-color: {perf_color}20; color: {perf_color};'
+                    )
 
             # Séparateur
             ui.element('div').classes('h-px w-full').style(
@@ -297,16 +316,12 @@ def _stat_block(label, value, c, color=None):
             f'color: {color or c["text_primary"]}'
         )
 
-# ─────────────────────────────────────────────
-# Dialogue création/édition
-# ─────────────────────────────────────────────
 
 # ─────────────────────────────────────────────
 # Dialogue création/édition
 # ─────────────────────────────────────────────
 
 def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int = None):
-    # 🆕 Ajout de l'import Position pour créer les Fonds €
     from database.models import Position
 
     is_edit = portefeuille_id is not None
@@ -354,9 +369,9 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
     }
 
     with ui.dialog() as dialog, ui.card().classes('p-6 gap-4').style(
-            f'background-color: {c["card_bg"]}; '
-            f'border: 1px solid {c["card_border"]}; '
-            f'min-width: 500px; max-width: 600px;'
+        f'background-color: {c["card_bg"]}; '
+        f'border: 1px solid {c["card_border"]}; '
+        f'min-width: 500px; max-width: 600px;'
     ):
         ui.label('Modifier le portefeuille' if is_edit else 'Nouveau portefeuille') \
             .classes('text-xl font-bold').style(f'color: {c["text_primary"]}')
@@ -384,7 +399,7 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
             f'background-color: {c["card_border"]}; color: {c["text_primary"]};'
         )
 
-        # 🆕 --- GESTION DES FONDS EUROS ---
+        # ─── GESTION DES FONDS EUROS ───
         fonds_euro_container = ui.column().classes('w-full gap-2 p-3 rounded-lg').style(
             f'background-color: {c["card_border"]}30; border: 1px dashed {c["card_border"]};'
         )
@@ -401,7 +416,7 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
                     ui.label('💶 Configuration des Fonds Euros').classes('text-sm font-bold').style(
                         f'color: {c["text_primary"]}')
                     ui.label(
-                        'Saisissez le nom de vos Fonds €. Laissez vide si vous n\'en avez pas ou qu\'un seul.').classes(
+                        "Saisissez le nom de vos Fonds €. Laissez vide si vous n'en avez pas ou qu'un seul.").classes(
                         'text-xs').style(f'color: {c["text_secondary"]}')
 
                     # Récupération des valeurs existantes
@@ -420,8 +435,6 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
                 fonds_euro_container.set_visibility(False)
                 fonds_euro_inputs.clear()
 
-        # -----------------------------------
-
         def update_preview():
             type_val = type_input.value or '...'
             prop_id = proprietaire_input.value
@@ -433,7 +446,7 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
             else:
                 preview_label.text = f'📋 Nom affiché : {type_val}'
 
-            update_fonds_euros_ui()  # On met à jour l'affichage des Fonds €
+            update_fonds_euros_ui()
 
         update_preview()
         type_input.on('update:model-value', lambda _: update_preview())
@@ -446,7 +459,7 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
             'placeholder="ex: Boursorama, Crédit Agricole, Linxea..."'
         )
 
-        with ui.input('Date d\'ouverture', value=date_initiale_fr) \
+        with ui.input("Date d'ouverture", value=date_initiale_fr) \
                 .classes('w-full') \
                 .props('mask="##/##/####" placeholder="JJ/MM/AAAA"') as date_input:
             with ui.menu().props('no-parent-event') as menu:
@@ -460,10 +473,12 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
 
         url_input = ui.input(
             'URL de gestion en ligne', value=data['url_gestion'] or ''
-        ).classes('w-full').props('placeholder="https://..."')
+        ).classes('w-full').props(
+            'placeholder="https://..."'
+        )
 
         # ── Logo : upload direct sur disque ──
-        ui.label('Logo de l\'établissement').style(f'color: {c["text_secondary"]}')
+        ui.label("Logo de l'établissement").style(f'color: {c["text_secondary"]}')
 
         logo_container = ui.row().classes('items-center gap-4 w-full')
 
@@ -471,7 +486,7 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
             logo_container.clear()
             with logo_container:
                 with ui.element('div').classes(
-                        'rounded-lg flex items-center justify-center overflow-hidden'
+                    'rounded-lg flex items-center justify-center overflow-hidden'
                 ).style(
                     f'width: 64px; height: 64px; background-color: white; '
                     f'border: 1px solid {c["card_border"]};'
@@ -619,14 +634,14 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
                         session.add(p)
                         session.flush()  # Pour avoir le p.id
 
-                    # 🆕 Sauvegarde des Fonds Euros
+                    # Sauvegarde des Fonds Euros
                     is_av_per = p.type in ['Assurance-Vie', 'AV', 'PER', 'Assurance Vie']
 
                     if is_av_per and fonds_euro_inputs:
                         noms_saisis = []
-                        if fonds_euro_inputs['fe_1'].value and fonds_euro_inputs['fe_1'].value.strip():
+                        if fonds_euro_inputs.get('fe_1') and fonds_euro_inputs['fe_1'].value and fonds_euro_inputs['fe_1'].value.strip():
                             noms_saisis.append(fonds_euro_inputs['fe_1'].value.strip())
-                        if fonds_euro_inputs['fe_2'].value and fonds_euro_inputs['fe_2'].value.strip():
+                        if fonds_euro_inputs.get('fe_2') and fonds_euro_inputs['fe_2'].value and fonds_euro_inputs['fe_2'].value.strip():
                             noms_saisis.append(fonds_euro_inputs['fe_2'].value.strip())
 
                         # Création ou MAJ
@@ -651,9 +666,6 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
                                 )
                                 session.add(new_fe)
 
-                        # (Optionnel) : Gérer la suppression d'un FE si l'utilisateur a effacé le champ
-                        # Non implémenté ici pour éviter de supprimer accidentellement un FE avec de l'argent dessus
-
                     session.commit()
 
                 ui.notify(
@@ -667,7 +679,7 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
             ui.button('Enregistrer', on_click=save).props('unelevated') \
                 .classes('bg-blue-600 text-white')
 
-    dialog.open()
+        dialog.open()
 
 
 # ─────────────────────────────────────────────
@@ -702,4 +714,4 @@ def _confirm_delete(portefeuille_id: int, name: str, refresh):
             ui.button('Supprimer', on_click=do_delete).props('unelevated') \
                 .classes('bg-red-600 text-white')
 
-    dialog.open()
+        dialog.open()

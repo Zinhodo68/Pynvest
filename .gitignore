@@ -17,6 +17,7 @@ patrimoine.db
 patrimoine.db.backup
 patrimoine.db-wal
 patrimoine.db-shm
+patrimoine.bak.db
 *.sqlite
 *.sqlite3
 
