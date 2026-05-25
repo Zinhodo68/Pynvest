@@ -16,7 +16,7 @@ from pages.portefeuille_detail._cash_helpers import impact_cash, ajuster_cash
 from services.labels import get_display_name
 
 
-def open_sell_dialog(portefeuille_id, c, refresh):
+def open_sell_dialog(portefeuille_id, c, refresh, refresh_chart=None):
     """Dialogue de vente d'une position détenue."""
     # ✅ Capture du contexte client utilisateur d'origine (IHM)
     client = ui.context.client
@@ -179,7 +179,7 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                 # Date
                 date_today_fr = date.today().strftime('%d/%m/%Y')
                 with ui.input("Date de vente", value=date_today_fr).classes('w-full') \
-                        .props('mask="##/##/####" placeholder="JJ/MM/AAAA"') as date_input:
+                        .props('mask="##/##/####" placeholder="JJ/MM/AAAA" onfocus="this.select()"') as date_input:
                     with ui.menu().props('no-parent-event') as menu:
                         date_picker = ui.date().bind_value(date_input).props(
                             'mask="DD/MM/YYYY"'
@@ -197,7 +197,7 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                     'Prix de vente unitaire (€) *',
                     value=cours_initial,
                     format='%.4f', min=0
-                ).classes('w-full')
+                ).classes('w-full').props('onfocus="this.select()"')
 
                 price_info_label = ui.label('').classes('text-xs italic px-2').style(
                     f'color: {c["text_secondary"]}; min-height: 16px;'
@@ -234,6 +234,7 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                         updating['value'] = True
                         with client:
                             prix_input.value = cours_initial
+                            prix_input.run_method('select')  # <-- Ajoutez ceci
                             price_state['last_auto_value'] = cours_initial
                         updating['value'] = False
                         with client:
@@ -264,6 +265,7 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                             updating['value'] = True
                             with client:
                                 prix_input.value = round(price_eur, 4)
+                                prix_input.run_method('select')  # <-- Ajoutez ceci
                                 price_state['last_auto_value'] = price_eur
                             updating['value'] = False
                             with client:
@@ -301,7 +303,7 @@ def open_sell_dialog(portefeuille_id, c, refresh):
 
                 frais_input = ui.number(
                     'Frais de courtage (€)', value=0, format='%.2f', min=0
-                ).classes('w-full')
+                ).classes('w-full').props('onfocus="this.select()"')
 
                 ui.label("Saisissez l'un OU l'autre").classes('text-xs italic mt-2') \
                     .style(f'color: {c["text_secondary"]}')
@@ -312,13 +314,13 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                         value=pos['quantite'],
                         format='%.4f', min=0, step=0.0001,
                         max=pos['quantite']
-                    ).classes('flex-1')
+                    ).classes('flex-1').props('onfocus="this.select()"')
 
                     montant_input = ui.number(
                         '💶 Montant (€)',
                         value=pos['quantite'] * cours_initial,
                         format='%.2f', min=0
-                    ).classes('flex-1')
+                    ).classes('flex-1').props('onfocus="this.select()"')
 
                 if portefeuille_type in ['Assurance-Vie', 'PER']:
                     ui.label('Destination du produit de la vente').classes(
@@ -618,10 +620,11 @@ def open_sell_dialog(portefeuille_id, c, refresh):
                         # ── Phase 3 : backfill en arrière-plan (sécurisé avec le client) ──
                         asyncio.create_task(
                             _run_backfill_async(
-                                portefeuille_id,
-                                refresh,
-                                client,            # ✅ Transmission du contexte client
-                                need_backfill,
+                                portefeuille_id=portefeuille_id,
+                                refresh=refresh,
+                                client=client,
+                                need_cours=need_backfill,
+                                refresh_chart=refresh_chart,
                             )
                         )
 
@@ -632,7 +635,13 @@ def open_sell_dialog(portefeuille_id, c, refresh):
 
 
 # ✅ Ajout du paramètre 'client' pour l'exécution threadée asynchrone sécurisée
-async def _run_backfill_async(portefeuille_id: int, refresh, client, need_cours: bool = True):
+async def _run_backfill_async(
+    portefeuille_id: int,
+    refresh,
+    client,
+    need_cours: bool = True,
+    refresh_chart=None,
+):
     """Exécute le backfill dans un thread séparé, puis rafraîchit l'UI sans erreur de slot."""
     from services.backfill import backfill_cours_historique, backfill_valorisations
 
@@ -656,7 +665,12 @@ async def _run_backfill_async(portefeuille_id: int, refresh, client, need_cours:
         with client:
             notif.dismiss()
             ui.notify('📈 Historique mis à jour', type='positive', timeout=3000)
-            refresh()
+
+            # ✅ Ne pas reconstruire toute la page si on peut éviter
+            if refresh_chart:
+                refresh_chart()
+            else:
+                refresh()
 
     except Exception as e:
         # ✅ Gestion des erreurs sous contexte client

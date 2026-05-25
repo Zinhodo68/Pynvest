@@ -352,3 +352,21 @@ class CoursHistorique(Base):
             'cours': self.cours,
             'devise': self.devise,
         }
+from sqlalchemy import event
+
+@event.listens_for(Position.prix_moyen, 'set')
+def _watch_prix_moyen(target, value, oldvalue, initiator):
+    """Log toute modification de prix_moyen pour debug."""
+    import traceback
+    if oldvalue is not None and value is not None:
+        try:
+            oldv = float(oldvalue) if oldvalue else 0
+            newv = float(value) if value else 0
+            # Alerte si baisse de plus de 50%
+            if oldv > 1 and newv > 0 and (newv / oldv) < 0.5:
+                print(f'⚠️⚠️⚠️ ALERTE PRU DIVISÉ : {target.nom} '
+                      f'{oldv:.4f} → {newv:.4f}')
+                print('   Stack trace :')
+                traceback.print_stack(limit=8)
+        except (TypeError, ValueError):
+            pass

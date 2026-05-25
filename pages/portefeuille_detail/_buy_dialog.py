@@ -15,8 +15,9 @@ from services.search import unified_search, is_isin
 from pages.portefeuille_detail._cash_helpers import impact_cash, ajuster_cash
 
 
-def open_buy_dialog(portefeuille_id, c, refresh):
+def open_buy_dialog(portefeuille_id, c, refresh, refresh_chart=None):
     """Dialogue d'achat avec un seul champ de recherche unifié."""
+    client = ui.context.client
 
     state = {'selected': None}
 
@@ -73,7 +74,7 @@ def open_buy_dialog(portefeuille_id, c, refresh):
 
         search_input = ui.input(
             placeholder='Nom du titre, ticker (ex: AAPL, MC.PA) ou ISIN (ex: FR0010923375)...'
-        ).classes('w-full').props('clearable autofocus')
+        ).classes('w-full').props('clearable autofocus onfocus="this.select()"')  # Ajout de onfocus
 
         # Indicateur ISIN détecté
         isin_label = ui.label('').classes('text-xs italic px-2').style(
@@ -371,7 +372,7 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                 with ui.row().classes('w-full gap-3'):
                     nom_input = ui.input(
                         'Nom du titre *', value=prefill_name
-                    ).classes('flex-1').props('placeholder="ex: SCPI Primovie"')
+                    ).classes('flex-1').props('placeholder="ex: SCPI Primovie" onfocus="this.select()"')
 
                     cat_input = ui.select(
                         {
@@ -390,7 +391,7 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                 with ui.row().classes('w-full gap-3'):
                     code_input = ui.input(
                         'Code / ISIN (optionnel)'
-                    ).classes('flex-1').props('placeholder="ex: FR0011053068"')
+                    ).classes('flex-1').props('placeholder="ex: FR0011053068" onfocus="this.select()"')
                     devise_input = ui.select(
                         {'EUR': 'EUR €', 'USD': 'USD $', 'GBP': 'GBP £'},
                         value='EUR', label='Devise'
@@ -447,7 +448,7 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                 # Date
                 date_today_fr = date.today().strftime('%d/%m/%Y')
                 with ui.input("Date d'achat", value=date_today_fr).classes('w-full') \
-                        .props('mask="##/##/####" placeholder="JJ/MM/AAAA"') as date_input:
+                        .props('mask="##/##/####" placeholder="JJ/MM/AAAA" onfocus="this.select()"') as date_input:
                     with ui.menu().props('no-parent-event') as menu:
                         date_picker = ui.date().bind_value(date_input).props(
                             'mask="DD/MM/YYYY"'
@@ -465,7 +466,7 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                     f'Prix unitaire ({t.get("currency", "EUR")}) *',
                     value=t.get('current_price') or 0,
                     format='%.4f', min=0
-                ).classes('w-full')
+                ).classes('w-full').props('onfocus="this.select()"')
 
                 price_info_label = ui.label('').classes('text-xs italic px-2').style(
                     f'color: {c["text_secondary"]}; min-height: 16px;'
@@ -497,7 +498,9 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                     if target_date == date.today():
                         if t.get('current_price'):
                             updating['value'] = True
-                            prix_input.value = t['current_price']
+                            with client:  # <-- Utilisez le contexte client
+                                prix_input.value = t['current_price']
+                                prix_input.run_method('select')  # <-- Force la sélection/focus
                             price_state['last_auto_value'] = t['current_price']
                             updating['value'] = False
                             price_info_label.text = (
@@ -520,7 +523,9 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                         )
                         if info['price'] is not None:
                             updating['value'] = True
-                            prix_input.value = round(info['price'], 4)
+                            with client:  # <-- Utilisez le contexte client
+                                prix_input.value = round(info['price'], 4)
+                                prix_input.run_method('select')  # <-- Force la sélection/focus
                             price_state['last_auto_value'] = info['price']
                             updating['value'] = False
                             price_info_label.text = (
@@ -575,7 +580,7 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                 # Frais
                 frais_input = ui.number(
                     'Frais (€)', value=0, format='%.2f', min=0
-                ).classes('w-full')
+                ).classes('w-full').props('onfocus="this.select()"')
 
                 ui.label("Saisissez l'un OU l'autre").classes(
                     'text-xs italic mt-2'
@@ -585,12 +590,12 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                     quantite_input = ui.number(
                         '🔢 Quantité', value=0,
                         format='%.4f', min=0, step=0.0001
-                    ).classes('flex-1')
+                    ).classes('flex-1').props('onfocus="this.select()"')
 
                     montant_input = ui.number(
                         f'💶 Montant ({t.get("currency", "EUR")})', value=0,
                         format='%.2f', min=0
-                    ).classes('flex-1')
+                    ).classes('flex-1').props('onfocus="this.select()"')
 
                 def update_montant_from_qte():
                     if updating['value']:
@@ -846,10 +851,9 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                             session.commit()
 
                         # ── Phase 2 : feedback immédiat ──
-                        need_backfill = (
-                            t.get('source') == 'yahoo' and bool(t.get('symbol'))
+                        need_cours_backfill = (
+                                t.get('source') == 'yahoo' and bool(t.get('symbol'))
                         )
-                        ticker_for_backfill = t.get('symbol')
 
                         ui.notify(
                             f'✅ Achat de {q:g} × {t["name"][:30]} effectué',
@@ -859,10 +863,17 @@ def open_buy_dialog(portefeuille_id, c, refresh):
                         refresh()
 
                         # ── Phase 3 : backfill en arrière-plan ──
-                        if need_backfill:
-                            asyncio.create_task(
-                                _run_backfill_async(portefeuille_id, refresh)
+                        # ✅ on recalcule toujours les valorisations,
+                        # et on backfill les cours seulement si Yahoo
+                        asyncio.create_task(
+                            _run_backfill_async(
+                                portefeuille_id=portefeuille_id,
+                                refresh=refresh,
+                                client=client,
+                                need_cours=need_cours_backfill,
+                                refresh_chart=refresh_chart,
                             )
+                        )
 
                     ui.button("🛒 Confirmer l'achat", on_click=save_achat) \
                         .props('unelevated').classes('bg-emerald-600 text-white')
@@ -870,33 +881,46 @@ def open_buy_dialog(portefeuille_id, c, refresh):
     dialog.open()
 
 
-async def _run_backfill_async(portefeuille_id: int, refresh):
-    """Exécute le backfill dans un thread séparé, puis rafraîchit l'UI."""
+async def _run_backfill_async(
+    portefeuille_id: int,
+    refresh,
+    client,
+    need_cours: bool = False,
+    refresh_chart=None,
+):
+    """Exécute le backfill dans un thread séparé, puis rafraîchit uniquement le graphique."""
     from services.backfill import backfill_cours_historique, backfill_valorisations
 
-    # Notification discrète de début
-    notif = ui.notification(
-        '📈 Mise à jour de l\'historique en cours...',
-        type='ongoing',
-        spinner=True,
-        timeout=None,
-    )
+    with client:
+        notif = ui.notification(
+            "📈 Mise à jour de l'historique en cours...",
+            type='ongoing',
+            spinner=True,
+            timeout=None,
+        )
 
     try:
-        await asyncio.to_thread(backfill_cours_historique, portefeuille_id)
+        if need_cours:
+            await asyncio.to_thread(backfill_cours_historique, portefeuille_id)
+
         await asyncio.to_thread(backfill_valorisations, portefeuille_id)
 
-        notif.dismiss()
-        ui.notify('📈 Historique mis à jour', type='positive', timeout=3000)
+        with client:
+            notif.dismiss()
+            ui.notify('📈 Historique mis à jour', type='positive', timeout=3000)
 
-        # Rafraîchir pour mettre à jour le graphique
-        refresh()
+            # ✅ Ne pas reconstruire toute la page si on peut éviter
+            if refresh_chart:
+                refresh_chart()
+            else:
+                refresh()
 
     except Exception as e:
-        notif.dismiss()
-        ui.notify(
-            f'⚠️ Mise à jour historique échouée : {e}',
-            type='warning',
-            timeout=5000,
-        )
+        with client:
+            notif.dismiss()
+            ui.notify(
+                f'⚠️ Mise à jour historique échouée : {e}',
+                type='warning',
+                timeout=5000,
+            )
         print(f'⚠️ Backfill async échoué pour portefeuille #{portefeuille_id}: {e}')

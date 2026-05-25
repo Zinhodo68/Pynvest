@@ -2,6 +2,7 @@
 import asyncio
 import math
 from datetime import date, datetime
+
 from nicegui import ui
 from sqlalchemy import select
 
@@ -16,7 +17,11 @@ from services.labels import get_display_name
 # Backfill async
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def _run_backfill_async(portefeuille_id: int, need_cours: bool = False):
+async def _run_backfill_async(
+    portefeuille_id: int,
+    need_cours: bool = False,
+    refresh_chart=None,
+):
     """Backfill non-bloquant après toute transaction."""
     from services.backfill import backfill_cours_historique, backfill_valorisations
 
@@ -32,6 +37,10 @@ async def _run_backfill_async(portefeuille_id: int, need_cours: bool = False):
         await asyncio.to_thread(backfill_valorisations, portefeuille_id)
         notif.dismiss()
         ui.notify('📈 Historique mis à jour', type='positive', timeout=3000)
+
+        if refresh_chart:
+            refresh_chart()
+
     except Exception as e:
         notif.dismiss()
         ui.notify(f'⚠️ Recalcul échoué : {e}', type='warning', timeout=5000)
@@ -74,9 +83,9 @@ def _get_historical_assets(session, portefeuille_id: int,
     qui ne sont plus en position active.
 
     Retourne une liste de dicts pseudo-Position pour utilisation dans le select :
-        [{'pseudo_id': str, 'nom': str, 'ticker': str, 'code': str,
-          'categorie': str, 'quantite': 0, 'cours_actuel': None,
-          'is_historical': True}, ...]
+    [{'pseudo_id': str, 'nom': str, 'ticker': str, 'code': str,
+      'categorie': str, 'quantite': 0, 'cours_actuel': None,
+      'is_historical': True}, ...]
 
     Les pseudo_id sont des strings préfixés 'HIST_' pour les distinguer
     des IDs entiers des Position réelles.
@@ -196,7 +205,7 @@ def _count_active_filters(filters: dict) -> int:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def render_transactions_card(transactions, c, is_dark, refresh, portefeuille_id,
-                             full_width=False):
+                             full_width=False, refresh_chart=None):
     # Séparer les transactions principales des frais liés
     main_transactions = [t for t in transactions if not t.get('parent_transaction_id')]
     frais_by_parent = {}
@@ -234,8 +243,8 @@ def render_transactions_card(transactions, c, is_dark, refresh, portefeuille_id,
     unique_assets = _extract_unique_assets(main_transactions)
 
     with ui.card().classes('p-5 rounded-xl w-full').style(
-            f'background-color: {c["card_bg"]}; '
-            f'border: 1px solid {c["card_border"]};'
+        f'background-color: {c["card_bg"]}; '
+        f'border: 1px solid {c["card_border"]};'
     ):
         # ── Header ──
         with ui.row().classes('w-full items-center justify-between mb-1'):
@@ -266,7 +275,12 @@ def render_transactions_card(transactions, c, is_dark, refresh, portefeuille_id,
 
                 ui.button(
                     '+ Transaction',
-                    on_click=lambda: open_transaction_dialog(portefeuille_id, c, refresh)
+                    on_click=lambda: open_transaction_dialog(
+                        portefeuille_id,
+                        c,
+                        refresh,
+                        refresh_chart=refresh_chart,
+                    )
                 ).props('unelevated dense').classes('bg-blue-600 text-white')
 
         # ── Panneau de filtres (replié par défaut) ──
@@ -518,10 +532,10 @@ def render_transactions_card(transactions, c, is_dark, refresh, portefeuille_id,
             asset_display_name = resolve_display_name(t)
 
             with ui.row().classes('w-full items-center gap-3 p-2 rounded-lg').style(
-                    f'background-color: {c["card_border"]}20;'
+                f'background-color: {c["card_border"]}20;'
             ):
                 with ui.element('div').classes(
-                        'rounded-full flex items-center justify-center'
+                    'rounded-full flex items-center justify-center'
                 ).style(
                     f'background-color: {type_color}20; '
                     f'width: 32px; height: 32px; min-width: 32px;'
@@ -588,20 +602,29 @@ def render_transactions_card(transactions, c, is_dark, refresh, portefeuille_id,
                 ).style(f'color: {type_color}; white-space: nowrap;')
 
                 with ui.button(icon='more_vert').props(
-                        'flat round dense size=sm'
+                    'flat round dense size=sm'
                 ).style(f'color: {c["text_secondary"]};'):
                     with ui.menu():
                         ui.menu_item(
                             'Modifier',
                             on_click=lambda tid=t['id']:
                             open_transaction_dialog(
-                                portefeuille_id, c, refresh, transaction_id=tid
+                                portefeuille_id,
+                                c,
+                                refresh,
+                                transaction_id=tid,
+                                refresh_chart=refresh_chart,
                             )
                         )
                         ui.menu_item(
                             'Supprimer',
                             on_click=lambda tid=t['id'], lib=t['libelle'] or t['type']:
-                            _confirm_delete_transaction(tid, lib, refresh)
+                            _confirm_delete_transaction(
+                                tid,
+                                lib,
+                                refresh,
+                                refresh_chart=refresh_chart,
+                            )
                         )
 
         # ── Binding des événements de filtre ──
@@ -619,7 +642,8 @@ def render_transactions_card(transactions, c, is_dark, refresh, portefeuille_id,
 # Dialogue de transaction
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = None):
+def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = None,
+                            refresh_chart=None):
     """Création ou édition d'une transaction."""
     is_edit = transaction_id is not None
 
@@ -722,9 +746,9 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
     last_fees_parts_input_changed = {'value': None}
 
     with ui.dialog() as dialog, ui.card().classes('p-6 gap-4').style(
-            f'background-color: {c["card_bg"]}; '
-            f'border: 1px solid {c["card_border"]}; '
-            f'min-width: 450px;'
+        f'background-color: {c["card_bg"]}; '
+        f'border: 1px solid {c["card_border"]}; '
+        f'min-width: 450px;'
     ):
         ui.label('Modifier la transaction' if is_edit else 'Ajouter une transaction') \
             .classes('text-xl font-bold').style(f'color: {c["text_primary"]}')
@@ -765,12 +789,22 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                 if e.value == 'achat':
                     dialog.close()
                     from pages.portefeuille_detail._buy_dialog import open_buy_dialog
-                    open_buy_dialog(portefeuille_id, c, refresh)
+                    open_buy_dialog(
+                        portefeuille_id,
+                        c,
+                        refresh,
+                        refresh_chart=refresh_chart,
+                    )
                     return
                 elif e.value == 'vente':
                     dialog.close()
                     from pages.portefeuille_detail._sell_dialog import open_sell_dialog
-                    open_sell_dialog(portefeuille_id, c, refresh)
+                    open_sell_dialog(
+                        portefeuille_id,
+                        c,
+                        refresh,
+                        refresh_chart=refresh_chart,
+                    )
                     return
             update_visibility()
 
@@ -1533,7 +1567,11 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                 refresh()
 
                 asyncio.create_task(
-                    _run_backfill_async(portefeuille_id, need_cours=has_ticker)
+                    _run_backfill_async(
+                        portefeuille_id,
+                        need_cours=has_ticker,
+                        refresh_chart=refresh_chart,
+                    )
                 )
 
             ui.button('Enregistrer', on_click=save).props('unelevated') \
@@ -1542,7 +1580,7 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
     dialog.open()
 
 
-def _confirm_delete_transaction(transaction_id, libelle, refresh):
+def _confirm_delete_transaction(transaction_id, libelle, refresh, refresh_chart=None):
     with get_session() as session:
         t = session.get(Transaction, transaction_id)
         if not t:
@@ -1553,7 +1591,7 @@ def _confirm_delete_transaction(transaction_id, libelle, refresh):
     if children:
         children_info = (
             f'\n⚠️ {len(children)} transaction(s) liée(s) seront aussi supprimées :\n'
-            + '\n'.join(f'  • {ch.libelle or ch.type_operation}' for ch in children)
+            + '\n'.join(f' • {ch.libelle or ch.type_operation}' for ch in children)
         )
 
     with ui.dialog() as dialog, ui.card().classes('p-6 gap-4'):
@@ -1782,7 +1820,11 @@ def _confirm_delete_transaction(transaction_id, libelle, refresh):
 
             if ptf_id_for_backfill is not None:
                 asyncio.create_task(
-                    _run_backfill_async(ptf_id_for_backfill, need_cours=has_ticker)
+                    _run_backfill_async(
+                        ptf_id_for_backfill,
+                        need_cours=has_ticker,
+                        refresh_chart=refresh_chart,
+                    )
                 )
 
         with ui.row().classes('w-full justify-end gap-2'):
