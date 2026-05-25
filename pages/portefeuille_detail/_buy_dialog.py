@@ -15,8 +15,10 @@ from services.search import unified_search, is_isin
 from pages.portefeuille_detail._cash_helpers import impact_cash, ajuster_cash
 
 
-def open_buy_dialog(portefeuille_id, c, refresh, refresh_chart=None):
-    """Dialogue d'achat avec un seul champ de recherche unifié."""
+def open_buy_dialog(portefeuille_id, c, refresh,
+                    preselect_ticker=None, preselect_code=None, preselect_nom=None,
+                    refresh_chart=None):
+    """Dialogue d'achat. Si preselect_ticker est fourni, pré-sélectionne l'actif."""
     client = ui.context.client
 
     state = {'selected': None}
@@ -877,6 +879,12 @@ def open_buy_dialog(portefeuille_id, c, refresh, refresh_chart=None):
 
                     ui.button("🛒 Confirmer l'achat", on_click=save_achat) \
                         .props('unelevated').classes('bg-emerald-600 text-white')
+
+    # ── Pré-sélection si clic droit depuis une position ──
+    if preselect_ticker or preselect_nom:
+        query = preselect_ticker or preselect_nom
+        search_input.value = query
+        search_task['task'] = asyncio.create_task(do_search(query))
 
     dialog.open()
 

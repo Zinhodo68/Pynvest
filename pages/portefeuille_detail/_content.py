@@ -44,7 +44,6 @@ def _render_content(portefeuille_id, c, is_dark, refresh):
             ).props('flat')
             return
 
-        # ⚡ Pré-charge valorisation, total_verse, nb_transactions en 1 query
         preload_stats(session, [p])
 
         data = p.to_dict()
@@ -76,7 +75,7 @@ def _render_content(portefeuille_id, c, is_dark, refresh):
         render_header(data, type_info, accent_color, c, portefeuille_id, refresh, mono)
         render_kpis(data, accent_color, c, mono, portefeuille_id=portefeuille_id)
 
-        # Refresh ciblé du graphique uniquement
+        # ── Graphique dans un bandeau dépliable (fermé par défaut) ──
         @ui.refreshable
         def render_chart_card():
             with get_session() as chart_session:
@@ -100,30 +99,38 @@ def _render_content(portefeuille_id, c, is_dark, refresh):
                     for t in p_chart.transactions
                 ]
 
-            with ui.card().classes('w-full p-5 rounded-xl').style(
+            # ── Bandeau dépliable ──
+            with ui.card().classes('w-full p-0 rounded-xl overflow-hidden').style(
                 f'background-color: {c["card_bg"]}; '
                 f'border: 1px solid {c["card_border"]};'
             ):
-                ui.label('Évolution de la valeur').classes('text-lg font-bold mb-2').style(
-                    f'color: {c["text_primary"]}'
-                )
+                with ui.expansion(
+                    text='Évolution de la valeur',
+                    icon='show_chart',
+                    value=False,  # ← fermé par défaut
+                ).classes('w-full').style(
+                    f'color: {c["text_primary"]};'
+                ) as expansion:
+                    # Style du header de l'expansion
+                    expansion.props('dense header-class="text-lg font-bold"')
 
-                if not valorisations_chart:
-                    with ui.column().classes('w-full items-center py-8 gap-2'):
-                        ui.icon('show_chart').classes('text-5xl').style(
-                            f'color: {c["text_secondary"]}'
-                        )
-                        ui.label('Aucune valorisation enregistrée').style(
-                            f'color: {c["text_secondary"]}'
-                        )
-                else:
-                    render_chart(
-                        valorisations_chart,
-                        transactions_chart,
-                        accent_color,
-                        c,
-                        is_dark,
-                    )
+                    if not valorisations_chart:
+                        with ui.column().classes('w-full items-center py-8 gap-2'):
+                            ui.icon('show_chart').classes('text-5xl').style(
+                                f'color: {c["text_secondary"]}'
+                            )
+                            ui.label('Aucune valorisation enregistrée').style(
+                                f'color: {c["text_secondary"]}'
+                            )
+                    else:
+                        with ui.column().classes('w-full px-4 pb-4'):
+                            render_chart(
+                                valorisations_chart,
+                                transactions_chart,
+                                accent_color,
+                                c,
+                                is_dark,
+                            )
 
         render_chart_card()
 

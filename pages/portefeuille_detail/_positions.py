@@ -17,7 +17,7 @@ def render_positions_section(positions, data, c, portefeuille_id, refresh, is_da
         f'background-color: {c["card_bg"]}; '
         f'border: 1px solid {c["card_border"]};'
     ):
-        # Header (réduit en hauteur)
+        # Header
         with ui.row().classes('w-full items-center justify-between px-5 py-3').style(
             f'border-bottom: 1px solid {c["card_border"]};'
         ):
@@ -28,16 +28,15 @@ def render_positions_section(positions, data, c, portefeuille_id, refresh, is_da
                 ui.label(f'{len(positions)} ligne(s) dans le portefeuille').classes('text-xs') \
                     .style(f'color: {c["text_secondary"]}')
 
-            # Menu déroulant "Relevé annuel" à droite du header
             available_years = get_available_years(portefeuille_id)
             if available_years:
                 with ui.button(icon='description').props(
-                        'flat dense'
+                    'flat dense'
                 ).style(f'color: {c["text_secondary"]};') \
-                        .tooltip("Relevé d'information annuel"):
+                    .tooltip("Relevé d'information annuel"):
                     with ui.menu():
                         with ui.row().classes('items-center gap-2 px-3 py-2').style(
-                                'pointer-events: none;'
+                            'pointer-events: none;'
                         ):
                             ui.icon('event_note').classes('text-sm').style(
                                 f'color: {c["text_secondary"]}'
@@ -70,7 +69,7 @@ def render_positions_section(positions, data, c, portefeuille_id, refresh, is_da
         total_pru = sum(p['prix_revient'] for p in positions)
         total_pv = total_valo - total_pru
 
-        # En-tête tableau (réduit en hauteur, colonne Catégorie supprimée)
+        # En-tête tableau (sans colonne vide à la fin)
         with ui.row().classes('w-full px-5 py-1.5 text-xs font-semibold uppercase tracking-wider').style(
             f'color: {c["text_secondary"]}; '
             f'background-color: {c["card_border"]}30;'
@@ -81,9 +80,7 @@ def render_positions_section(positions, data, c, portefeuille_id, refresh, is_da
             ui.label('Cours').style('width: 100px; text-align: right;')
             ui.label('Valorisation').style('width: 130px; text-align: right;')
             ui.label('+/-').style('width: 130px; text-align: right;')
-            ui.label('').style('width: 40px;')
 
-        # Séparation titres / réserves de liquidités
         RESERVES_CATEGORIES = {'Cash', 'Fonds €', 'Fonds Euro'}
 
         def is_reserve(p):
@@ -92,7 +89,6 @@ def render_positions_section(positions, data, c, portefeuille_id, refresh, is_da
         titres = [p for p in positions if not is_reserve(p)]
         reserves = [p for p in positions if is_reserve(p)]
 
-        # 3. Limitation de hauteur avec défilement interne pour les lignes de données
         with ui.column().classes('w-full max-h-[350px] overflow-y-auto gap-0'):
             for pos in titres:
                 _render_position_row(pos, c, portefeuille_id, refresh)
@@ -109,21 +105,14 @@ def render_positions_section(positions, data, c, portefeuille_id, refresh, is_da
             for pos in reserves:
                 _render_position_row(pos, c, portefeuille_id, refresh)
 
-        # Pied de page fixe
         _render_positions_footer(total_pru, total_valo, total_pv, c)
 
 
 def _render_rename_dialog(pos, c, refresh):
-    """
-    Popup de renommage d'un support.
-    Le nom personnalisé est prioritaire sur le nom Yahoo/Boursorama à l'affichage.
-    Le ticker Yahoo reste inchangé pour la récupération des cours.
-    """
     ticker = pos.get('ticker')
     code = pos.get('code')
     nom_original = pos.get('nom') or ticker or code or '—'
 
-    # Nom actuellement affiché (custom ou fallback Yahoo)
     current_display = get_display_name(
         ticker=ticker,
         code=code,
@@ -139,7 +128,6 @@ def _render_rename_dialog(pos, c, refresh):
             f'color: {c["text_primary"]}'
         )
 
-        # Infos du support (lecture seule)
         ticker_display = ticker or code or '—'
         ui.label(f'Ticker / Code : {ticker_display}').classes('text-sm').style(
             f'color: {c["text_secondary"]}'
@@ -165,8 +153,6 @@ def _render_rename_dialog(pos, c, refresh):
         )
 
         with ui.row().classes('w-full justify-between items-center gap-2 mt-2'):
-
-            # Bouton "Réinitialiser" à gauche
             async def handle_reset():
                 deleted = delete_custom_name(ticker=ticker, code=code)
                 if deleted:
@@ -178,7 +164,6 @@ def _render_rename_dialog(pos, c, refresh):
 
             ui.button('Réinitialiser', on_click=handle_reset).props('flat color=warning')
 
-            # Annuler + Enregistrer à droite
             with ui.row().classes('gap-2'):
                 ui.button('Annuler', on_click=dialog.close).props('flat')
 
@@ -188,7 +173,6 @@ def _render_rename_dialog(pos, c, refresh):
                         ui.notify('Le nom ne peut pas être vide', color='negative')
                         return
                     if new_name == nom_original:
-                        # Pas de custom_name nécessaire si identique à l'original
                         delete_custom_name(ticker=ticker, code=code)
                         ui.notify('Nom inchangé — label supprimé si existant', color='info')
                     else:
@@ -206,7 +190,7 @@ def _render_rename_dialog(pos, c, refresh):
                     'unelevated color=primary'
                 )
 
-    dialog.open()
+        dialog.open()
 
 
 def _render_position_row(pos, c, portefeuille_id, refresh):
@@ -215,18 +199,48 @@ def _render_position_row(pos, c, portefeuille_id, refresh):
     is_cash = pos['nom'] == 'Cash'
     is_reserve = pos.get('categorie') in {'Cash', 'Fonds €', 'Fonds Euro'} or is_cash
 
-    # ✅ Résolution du nom à afficher (custom_name prioritaire)
     display_name = get_display_name(
         ticker=pos.get('ticker'),
         code=pos.get('code'),
         fallback=pos['nom']
     ) if not is_cash else 'Cash'
 
-    # Hauteur de ligne réduite à py-1.5 au lieu de py-3
-    with ui.row().classes('w-full px-5 py-1.5 items-center').style(
+    # ── Ligne de la position ──
+    row = ui.row().classes('w-full px-5 py-1.5 items-center').style(
         f'border-top: 1px solid {c["card_border"]};'
         + (f' background-color: {cat_info["couleur"]}10;' if is_cash else '')
-    ):
+        + (' cursor: context-menu;' if not is_cash and not is_reserve else '')
+    )
+
+    with row:
+        # ── Menu contextuel intégré directement dans le parent (row) ──
+        if not is_cash and not is_reserve:
+            # En combinant 'context-menu' et 'touch-position', Quasar gère l'ouverture
+            # au clic droit à l'emplacement précis du curseur.
+            with ui.menu().props('auto-close context-menu touch-position'):
+                with ui.row().classes('items-center gap-2 px-3 py-2').style(
+                    'pointer-events: none;'
+                ):
+                    ui.icon('trending_up').classes('text-sm').style(
+                        f'color: {c["text_secondary"]}'
+                    )
+                    ui.label(display_name).classes(
+                        'text-xs font-bold tracking-wider'
+                    ).style(f'color: {c["text_secondary"]};')
+                ui.separator()
+                ui.menu_item(
+                    '🛒 Acheter',
+                    on_click=lambda p=pos: _open_buy_dialog(portefeuille_id, p, c, refresh)
+                )
+                ui.menu_item(
+                    '💹 Vendre',
+                    on_click=lambda p=pos: _open_sell_dialog(portefeuille_id, p, c, refresh)
+                )
+                ui.menu_item(
+                    '🎁 Dividende',
+                    on_click=lambda p=pos: _open_dividende_dialog(portefeuille_id, p, c, refresh)
+                )
+
         # Colonne Titre
         with ui.column().classes('gap-0').style('flex: 2;'):
             with ui.row().classes('items-center gap-1'):
@@ -237,7 +251,6 @@ def _render_position_row(pos, c, portefeuille_id, refresh):
                 ui.label(display_name).classes('text-sm font-semibold').style(
                     f'color: {c["text_primary"]}'
                 )
-                # ✏️ Bouton renommage (uniquement sur les titres, pas les réserves)
                 if not is_reserve:
                     ui.button(
                         icon='edit',
@@ -251,19 +264,17 @@ def _render_position_row(pos, c, portefeuille_id, refresh):
                     f'color: {c["text_secondary"]}'
                 )
 
-        # La colonne "Catégorie" a été complètement retirée ici pour libérer de la place
-
         # Quantité
         ui.label(f'{pos["quantite"]:g}'.replace('.', ',') if not is_cash else '—') \
             .classes('text-sm').style(
-                f'color: {c["text_primary"]}; width: 90px; text-align: right;'
-            )
+            f'color: {c["text_primary"]}; width: 90px; text-align: right;'
+        )
 
         # PRU
         ui.label(format_money(pos['prix_moyen'], decimals=2) if not is_cash else '—') \
             .classes('text-sm').style(
-                f'color: {c["text_secondary"]}; width: 100px; text-align: right;'
-            )
+            f'color: {c["text_secondary"]}; width: 100px; text-align: right;'
+        )
 
         # Cours actuel
         if pos['cours_actuel'] is not None and not is_cash:
@@ -282,7 +293,7 @@ def _render_position_row(pos, c, portefeuille_id, refresh):
 
         # +/- value
         with ui.column().classes('gap-0').style(
-                'width: 130px; align-items: flex-end;'
+            'width: 130px; align-items: flex-end;'
         ):
             if is_cash:
                 ui.label('—').classes('text-sm').style(
@@ -296,23 +307,45 @@ def _render_position_row(pos, c, portefeuille_id, refresh):
                     'text-xs'
                 ).style(f'color: {pv_color};')
 
-        # Menu actions
-        if is_cash:
-            ui.label('').style('width: 40px;')
-        else:
-            with ui.button(icon='more_vert').props(
-                    'flat round dense size=sm'
-            ).style(f'color: {c["text_secondary"]}; width: 40px;'):
-                with ui.menu():
-                    ui.menu_item('Modifier', on_click=lambda pid=pos['id']:
-                        open_position_edit_dialog(portefeuille_id, c, refresh, pid))
-                    ui.menu_item('Supprimer', on_click=lambda pid=pos['id'], n=pos['nom']:
-                        confirm_delete_position(pid, n, refresh))
+
+# ── Fonctions d'ouverture des dialogues avec pré-sélection ──
+
+def _open_buy_dialog(portefeuille_id, pos, c, refresh):
+    """Ouvre le dialogue d'achat avec l'actif pré-sélectionné."""
+    from pages.portefeuille_detail._buy_dialog import open_buy_dialog
+    # Passer le ticker ou code de la position pour pré-remplir
+    open_buy_dialog(
+        portefeuille_id, c, refresh,
+        preselect_ticker=pos.get('ticker'),
+        preselect_code=pos.get('code'),
+        preselect_nom=pos.get('nom'),
+    )
+
+
+def _open_sell_dialog(portefeuille_id, pos, c, refresh):
+    """Ouvre le dialogue de vente avec l'actif pré-sélectionné."""
+    from pages.portefeuille_detail._sell_dialog import open_sell_dialog
+    open_sell_dialog(
+        portefeuille_id, c, refresh,
+        preselect_ticker=pos.get('ticker'),
+        preselect_code=pos.get('code'),
+        preselect_nom=pos.get('nom'),
+    )
+
+
+def _open_dividende_dialog(portefeuille_id, pos, c, refresh):
+    """Ouvre le dialogue de dividende avec l'actif pré-sélectionné."""
+    from pages.portefeuille_detail._dividende_dialog import open_dividende_dialog
+    open_dividende_dialog(
+        portefeuille_id, c, refresh,
+        preselect_ticker=pos.get('ticker'),
+        preselect_code=pos.get('code'),
+        preselect_nom=pos.get('nom'),
+    )
 
 
 def _render_positions_footer(total_pru, total_valo, total_pv, c):
     total_color = get_perf_color(total_pv)
-    # Hauteur de ligne réduite à py-1.5 au lieu de py-3
     with ui.row().classes('w-full px-5 py-1.5 items-center').style(
         f'border-top: 2px solid {c["card_border"]}; '
         f'background-color: {c["card_border"]}20;'
@@ -320,7 +353,6 @@ def _render_positions_footer(total_pru, total_valo, total_pv, c):
         ui.label('TOTAL POSITIONS').classes('text-xs font-bold tracking-wider').style(
             f'color: {c["text_secondary"]}; flex: 2;'
         )
-        # La colonne Catégorie vide (width: 110px) a été retirée pour préserver l'alignement
         ui.label('').style('width: 90px;')
         ui.label('').style('width: 100px;')
         ui.label(format_money(total_pru, decimals=2)).classes('text-sm').style(
@@ -337,13 +369,9 @@ def _render_positions_footer(total_pru, total_valo, total_pv, c):
             ui.label(format_percent(pv_pct)).classes('text-xs').style(
                 f'color: {total_color};'
             )
-        ui.label('').style('width: 40px;')
 
 
 def open_position_edit_dialog(portefeuille_id, c, refresh, position_id: int):
-    """Édition rapide d'une position existante (PRU, quantité, cours).
-    Pour modifications structurelles : supprimer/recréer."""
-
     with get_session() as session:
         pos = session.get(Position, position_id)
         if not pos:
@@ -354,9 +382,9 @@ def open_position_edit_dialog(portefeuille_id, c, refresh, position_id: int):
         data = pos.to_dict()
 
     with ui.dialog() as dialog, ui.card().classes('p-6 gap-3').style(
-            f'background-color: {c["card_bg"]}; '
-            f'border: 1px solid {c["card_border"]}; '
-            f'min-width: 400px;'
+        f'background-color: {c["card_bg"]}; '
+        f'border: 1px solid {c["card_border"]}; '
+        f'min-width: 400px;'
     ):
         ui.label('Modifier la position').classes('text-xl font-bold').style(
             f'color: {c["text_primary"]}'
@@ -402,11 +430,10 @@ def open_position_edit_dialog(portefeuille_id, c, refresh, position_id: int):
             ui.button('Enregistrer', on_click=save).props('unelevated') \
                 .classes('bg-blue-600 text-white')
 
-    dialog.open()
+        dialog.open()
 
 
 def confirm_delete_position(position_id, name, refresh):
-    """Confirmation de suppression d'une position."""
     if name == 'Cash':
         ui.notify('La position Cash ne peut pas être supprimée', type='warning')
         return
@@ -432,4 +459,4 @@ def confirm_delete_position(position_id, name, refresh):
             ui.button('Supprimer', on_click=do_delete).props('unelevated') \
                 .classes('bg-red-600 text-white')
 
-    dialog.open()
+        dialog.open()

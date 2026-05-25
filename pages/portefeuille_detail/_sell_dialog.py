@@ -16,9 +16,10 @@ from pages.portefeuille_detail._cash_helpers import impact_cash, ajuster_cash
 from services.labels import get_display_name
 
 
-def open_sell_dialog(portefeuille_id, c, refresh, refresh_chart=None):
+def open_sell_dialog(portefeuille_id, c, refresh,
+                     preselect_ticker=None, preselect_code=None, preselect_nom=None,
+                     refresh_chart=None):
     """Dialogue de vente d'une position détenue."""
-    # ✅ Capture du contexte client utilisateur d'origine (IHM)
     client = ui.context.client
 
     with get_session() as session:
@@ -46,14 +47,12 @@ def open_sell_dialog(portefeuille_id, c, refresh, refresh_chart=None):
                 ).order_by(Position.nom)
             ).scalars().all()
 
-        # Snapshot du type portefeuille hors session
         portefeuille_type = portefeuille.type
 
     if not positions_data:
         ui.notify("Aucune position à vendre dans ce portefeuille", type='warning')
         return
 
-    # Pré-calcul des noms d'affichage pour chaque position
     for p in positions_data:
         p['display_name'] = get_display_name(
             ticker=p.get('ticker'),
@@ -61,7 +60,6 @@ def open_sell_dialog(portefeuille_id, c, refresh, refresh_chart=None):
             fallback=p['nom']
         )
 
-    # Snapshot des fonds euro hors session
     fonds_euro_positions_data = [
         {
             'id': f.id,
@@ -121,7 +119,6 @@ def open_sell_dialog(portefeuille_id, c, refresh, refresh_chart=None):
             updating = {'value': False}
 
             with form_container:
-                # ── Récap de la position ──
                 with ui.card().classes('w-full p-4 rounded-lg').style(
                         f'background-color: {c["card_border"]}30; '
                         f'border: 1px solid {c["card_border"]};'
@@ -165,7 +162,6 @@ def open_sell_dialog(portefeuille_id, c, refresh, refresh_chart=None):
                                 .classes('text-base font-bold').style(
                                 f'color: {c["text_primary"]}')
 
-                # ── Source du cours ──
                 if pos.get('ticker'):
                     source = 'yahoo'
                     symbol_or_url = pos['ticker']
@@ -176,7 +172,6 @@ def open_sell_dialog(portefeuille_id, c, refresh, refresh_chart=None):
                     source = 'manual'
                     symbol_or_url = None
 
-                # Date
                 date_today_fr = date.today().strftime('%d/%m/%Y')
                 with ui.input("Date de vente", value=date_today_fr).classes('w-full') \
                         .props('mask="##/##/####" placeholder="JJ/MM/AAAA" onfocus="this.select()"') as date_input:
@@ -203,9 +198,11 @@ def open_sell_dialog(portefeuille_id, c, refresh, refresh_chart=None):
                     f'color: {c["text_secondary"]}; min-height: 16px;'
                 )
 
+                # Ajout de la clé 'last_fetched_date' pour mémoriser la date traitée
                 price_state = {
                     'manually_modified': False,
                     'last_auto_value': cours_initial,
+                    'last_fetched_date': date_today_fr,
                 }
 
                 if source != 'manual':
@@ -217,24 +214,34 @@ def open_sell_dialog(portefeuille_id, c, refresh, refresh_chart=None):
                         "ℹ️ Position manuelle : pas d'auto-remplissage du cours"
                     )
 
-                # ✅ Sécurisation de l'IHM via le contexte client
                 async def update_price_for_date():
                     if price_state['manually_modified']:
                         return
                     if source == 'manual':
                         return
+
+                    current_date_str = date_input.value
+
+                    # 1. Évite d'exécuter la requête si la date n'a pas changé (ex: navigation avec TAB)
+                    if current_date_str == price_state.get('last_fetched_date'):
+                        return
+
                     try:
                         target_date = datetime.strptime(
-                            date_input.value, '%d/%m/%Y'
+                            current_date_str, '%d/%m/%Y'
                         ).date()
                     except (ValueError, TypeError):
                         return
 
+                    price_state['last_fetched_date'] = current_date_str
+
                     if target_date == date.today():
                         updating['value'] = True
                         with client:
-                            prix_input.value = cours_initial
-                            prix_input.run_method('select')  # <-- Ajoutez ceci
+                            # Ne réécrit la valeur et ne force la sélection que si nécessaire
+                            if abs((prix_input.value or 0) - cours_initial) > 0.0001:
+                                prix_input.value = cours_initial
+                                prix_input.run_method('select')
                             price_state['last_auto_value'] = cours_initial
                         updating['value'] = False
                         with client:
@@ -263,9 +270,12 @@ def open_sell_dialog(portefeuille_id, c, refresh, refresh_chart=None):
                                     price_eur = info['price'] * rate
 
                             updating['value'] = True
+                            new_price = round(price_eur, 4)
                             with client:
-                                prix_input.value = round(price_eur, 4)
-                                prix_input.run_method('select')  # <-- Ajoutez ceci
+                                # Ne met à jour la valeur et ne sélectionne que si la valeur change
+                                if abs((prix_input.value or 0) - new_price) > 0.0001:
+                                    prix_input.value = new_price
+                                    prix_input.run_method('select')
                                 price_state['last_auto_value'] = price_eur
                             updating['value'] = False
                             with client:
@@ -414,10 +424,9 @@ def open_sell_dialog(portefeuille_id, c, refresh, refresh_chart=None):
                         cout_revient = q * pru
                         plus_value = montant_net - cout_revient
                         pv_pct = (
-                            plus_value / cout_revient * 100
+                                plus_value / cout_revient * 100
                         ) if cout_revient > 0 else 0
 
-                        pv_emoji = '✅' if plus_value >= 0 else '❌'
                         warning = ''
                         if q > pos['quantite']:
                             warning = (
@@ -489,8 +498,6 @@ def open_sell_dialog(portefeuille_id, c, refresh, refresh_chart=None):
 
                         montant_brut = q * p_unit
                         montant_net = montant_brut - frais
-
-                        # ── Phase 1 : commit BDD (rapide) ──
                         need_backfill = False
 
                         with get_session() as session:
@@ -605,7 +612,6 @@ def open_sell_dialog(portefeuille_id, c, refresh, refresh_chart=None):
                             session.commit()
                             need_backfill = bool(pos.get('ticker'))
 
-                        # ── Phase 2 : feedback immédiat ──
                         cout = q * pos['prix_moyen']
                         pv = montant_net - cout
                         ui.notify(
@@ -617,35 +623,55 @@ def open_sell_dialog(portefeuille_id, c, refresh, refresh_chart=None):
                         dialog.close()
                         refresh()
 
-                        # ── Phase 3 : backfill en arrière-plan (sécurisé avec le client) ──
+                        # ── Backfill en arrière-plan ──
                         asyncio.create_task(
                             _run_backfill_async(
                                 portefeuille_id=portefeuille_id,
                                 refresh=refresh,
                                 client=client,
                                 need_cours=need_backfill,
-                                refresh_chart=refresh_chart,
+                                refresh_chart=None,
                             )
                         )
 
                     ui.button("💹 Confirmer la vente", on_click=save_vente) \
                         .props('unelevated').classes('bg-pink-600 text-white')
 
+    # ── Pré-sélection si clic droit depuis une position ──
+    if preselect_ticker or preselect_code or preselect_nom:
+        matched_id = None
+        for p in positions_data:
+            if preselect_ticker and p.get('ticker') == preselect_ticker:
+                matched_id = p['id']
+                break
+            if preselect_code and p.get('code') == preselect_code:
+                matched_id = p['id']
+                break
+            if preselect_nom and p.get('nom') == preselect_nom:
+                matched_id = p['id']
+                break
+
+        if matched_id:
+            position_select.value = matched_id
+            pos = next((p for p in positions_data if p['id'] == matched_id), None)
+            if pos:
+                state['selected_pos'] = pos
+                _render_sell_form(pos)
+                form_container.set_visibility(True)
+
     dialog.open()
 
 
-# ✅ Ajout du paramètre 'client' pour l'exécution threadée asynchrone sécurisée
 async def _run_backfill_async(
-    portefeuille_id: int,
-    refresh,
-    client,
-    need_cours: bool = True,
-    refresh_chart=None,
+        portefeuille_id: int,
+        refresh,
+        client,
+        need_cours: bool = True,
+        refresh_chart=None,
 ):
-    """Exécute le backfill dans un thread séparé, puis rafraîchit l'UI sans erreur de slot."""
+    """Exécute le backfill dans un thread séparé."""
     from services.backfill import backfill_cours_historique, backfill_valorisations
 
-    # ✅ On entre dans le contexte du client utilisateur pour afficher la notification de départ
     with client:
         notif = ui.notification(
             "📈 Mise à jour de l'historique en cours...",
@@ -655,25 +681,20 @@ async def _run_backfill_async(
         )
 
     try:
-        # backfill_cours uniquement si la position avait un ticker Yahoo
         if need_cours:
             await asyncio.to_thread(backfill_cours_historique, portefeuille_id)
 
         await asyncio.to_thread(backfill_valorisations, portefeuille_id)
 
-        # ✅ Une fois terminé, on ré-entre dans le contexte client pour modifier l'IHM
         with client:
             notif.dismiss()
             ui.notify('📈 Historique mis à jour', type='positive', timeout=3000)
-
-            # ✅ Ne pas reconstruire toute la page si on peut éviter
             if refresh_chart:
                 refresh_chart()
             else:
                 refresh()
 
     except Exception as e:
-        # ✅ Gestion des erreurs sous contexte client
         with client:
             notif.dismiss()
             ui.notify(
