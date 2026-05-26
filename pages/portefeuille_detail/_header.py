@@ -59,7 +59,7 @@ def _safe_notify(message: str, **kwargs):
         logger.warning(f'Notification ignorée (contexte détruit) : {message}')
 
 
-def render_header(data, type_info, accent_color, c, portefeuille_id, refresh, mono):
+def render_header(data, type_info, accent_color, c, portefeuille_id, refresh, mono, refresh_chart=None):
     """Header avec retour, identité, infos clés, et boutons d'action."""
     from pages.portefeuille_detail._transactions import open_transaction_dialog
     from pages.portefeuille_detail._mono_support import open_valorisation_dialog

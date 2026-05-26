@@ -71,10 +71,6 @@ def _render_content(portefeuille_id, c, is_dark, refresh):
         accent_color = type_info['couleur']
         mono = is_mono_support(data['type'])
 
-        # En-tête + KPIs
-        render_header(data, type_info, accent_color, c, portefeuille_id, refresh, mono)
-        render_kpis(data, accent_color, c, mono, portefeuille_id=portefeuille_id)
-
         # ── Graphique dans un bandeau dépliable (fermé par défaut) ──
         @ui.refreshable
         def render_chart_card():
@@ -132,6 +128,11 @@ def _render_content(portefeuille_id, c, is_dark, refresh):
                                 is_dark,
                             )
 
+        # En-tête + KPIs
+        render_header(data, type_info, accent_color, c, portefeuille_id, refresh, mono,
+                      refresh_chart=render_chart_card.refresh)
+        render_kpis(data, accent_color, c, mono, portefeuille_id=portefeuille_id)
+
         render_chart_card()
 
         # Section principale selon le type
@@ -149,7 +150,8 @@ def _render_content(portefeuille_id, c, is_dark, refresh):
         else:
             with ui.row().classes('w-full gap-4 flex-nowrap items-start'):
                 with ui.column().classes('gap-0').style('flex: 2; min-width: 0;'):
-                    render_positions_section(positions, data, c, portefeuille_id, refresh)
+                    render_positions_section(positions, data, c, portefeuille_id, refresh,
+                                             refresh_chart=render_chart_card.refresh)
                 with ui.column().classes('gap-0').style('flex: 1; min-width: 0;'):
                     render_transactions_card(
                         transactions,

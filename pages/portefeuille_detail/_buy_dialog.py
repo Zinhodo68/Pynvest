@@ -918,10 +918,9 @@ async def _run_backfill_async(
             ui.notify('📈 Historique mis à jour', type='positive', timeout=3000)
 
             # ✅ Ne pas reconstruire toute la page si on peut éviter
+            # On ne fait plus de refresh() global ici pour éviter de fermer les dialogues en cours
             if refresh_chart:
                 refresh_chart()
-            else:
-                refresh()
 
     except Exception as e:
         with client:

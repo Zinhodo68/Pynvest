@@ -630,7 +630,7 @@ def open_sell_dialog(portefeuille_id, c, refresh,
                                 refresh=refresh,
                                 client=client,
                                 need_cours=need_backfill,
-                                refresh_chart=None,
+                                refresh_chart=refresh_chart,
                             )
                         )
 
@@ -689,10 +689,10 @@ async def _run_backfill_async(
         with client:
             notif.dismiss()
             ui.notify('📈 Historique mis à jour', type='positive', timeout=3000)
+            # ✅ Ne pas reconstruire toute la page si on peut éviter
+            # On ne fait plus de refresh() global ici pour éviter de fermer les dialogues en cours
             if refresh_chart:
                 refresh_chart()
-            else:
-                refresh()
 
     except Exception as e:
         with client:

@@ -12,7 +12,7 @@ from pages.portefeuille_detail._releve_annuel import (
 from services.labels import get_display_name, set_custom_name, delete_custom_name
 
 
-def render_positions_section(positions, data, c, portefeuille_id, refresh, is_dark=False):
+def render_positions_section(positions, data, c, portefeuille_id, refresh, is_dark=False, refresh_chart=None):
     with ui.card().classes('w-full p-0 rounded-xl overflow-hidden').style(
         f'background-color: {c["card_bg"]}; '
         f'border: 1px solid {c["card_border"]};'
@@ -91,7 +91,7 @@ def render_positions_section(positions, data, c, portefeuille_id, refresh, is_da
 
         with ui.column().classes('w-full max-h-[350px] overflow-y-auto gap-0'):
             for pos in titres:
-                _render_position_row(pos, c, portefeuille_id, refresh)
+                _render_position_row(pos, c, portefeuille_id, refresh, refresh_chart=refresh_chart)
 
             if titres and reserves:
                 with ui.row().classes('w-full px-5 py-1 items-center').style(
@@ -103,7 +103,7 @@ def render_positions_section(positions, data, c, portefeuille_id, refresh, is_da
                     ).style(f'color: {c["text_secondary"]};')
 
             for pos in reserves:
-                _render_position_row(pos, c, portefeuille_id, refresh)
+                _render_position_row(pos, c, portefeuille_id, refresh, refresh_chart=refresh_chart)
 
         _render_positions_footer(total_pru, total_valo, total_pv, c)
 
@@ -193,7 +193,7 @@ def _render_rename_dialog(pos, c, refresh):
         dialog.open()
 
 
-def _render_position_row(pos, c, portefeuille_id, refresh):
+def _render_position_row(pos, c, portefeuille_id, refresh, refresh_chart=None):
     cat_info = get_categorie_info(pos['categorie'])
     pv_color = get_perf_color(pos['plus_value'])
     is_cash = pos['nom'] == 'Cash'
@@ -230,11 +230,11 @@ def _render_position_row(pos, c, portefeuille_id, refresh):
                 ui.separator()
                 ui.menu_item(
                     '🛒 Acheter',
-                    on_click=lambda p=pos: _open_buy_dialog(portefeuille_id, p, c, refresh)
+                    on_click=lambda p=pos: _open_buy_dialog(portefeuille_id, p, c, refresh, refresh_chart=refresh_chart)
                 )
                 ui.menu_item(
                     '💹 Vendre',
-                    on_click=lambda p=pos: _open_sell_dialog(portefeuille_id, p, c, refresh)
+                    on_click=lambda p=pos: _open_sell_dialog(portefeuille_id, p, c, refresh, refresh_chart=refresh_chart)
                 )
                 ui.menu_item(
                     '🎁 Dividende',
@@ -310,7 +310,7 @@ def _render_position_row(pos, c, portefeuille_id, refresh):
 
 # ── Fonctions d'ouverture des dialogues avec pré-sélection ──
 
-def _open_buy_dialog(portefeuille_id, pos, c, refresh):
+def _open_buy_dialog(portefeuille_id, pos, c, refresh, refresh_chart=None):
     """Ouvre le dialogue d'achat avec l'actif pré-sélectionné."""
     from pages.portefeuille_detail._buy_dialog import open_buy_dialog
     # Passer le ticker ou code de la position pour pré-remplir
@@ -319,10 +319,11 @@ def _open_buy_dialog(portefeuille_id, pos, c, refresh):
         preselect_ticker=pos.get('ticker'),
         preselect_code=pos.get('code'),
         preselect_nom=pos.get('nom'),
+        refresh_chart=refresh_chart
     )
 
 
-def _open_sell_dialog(portefeuille_id, pos, c, refresh):
+def _open_sell_dialog(portefeuille_id, pos, c, refresh, refresh_chart=None):
     """Ouvre le dialogue de vente avec l'actif pré-sélectionné."""
     from pages.portefeuille_detail._sell_dialog import open_sell_dialog
     open_sell_dialog(
@@ -330,6 +331,7 @@ def _open_sell_dialog(portefeuille_id, pos, c, refresh):
         preselect_ticker=pos.get('ticker'),
         preselect_code=pos.get('code'),
         preselect_nom=pos.get('nom'),
+        refresh_chart=refresh_chart
     )
 
 
