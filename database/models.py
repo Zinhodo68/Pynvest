@@ -150,13 +150,11 @@ class Portefeuille(Base):
         except Exception:
             return 0.0
 
-    @property
-
     # ──────────────────────────────────────────────────────────────────────
     # Sérialisation
     # ──────────────────────────────────────────────────────────────────────
 
-    def to_dict(self):
+    def to_dict(self, include_rendement_annualise: bool = True):
         """Dict pour l'affichage. Utilise le cache si disponible."""
         # nb_transactions : cache ou fallback len(transactions)
         if self._stats_cache is not None:
@@ -182,7 +180,13 @@ class Portefeuille(Base):
             'total_verse': self.total_verse,
             'plus_value': self.plus_value,
             'rendement_total_pct': self.rendement_total_pct,
-            'rendement_annualise_pct': self.rendement_annualise_pct,
+
+            # Important :
+            # On ne calcule le rendement annualisé que si demandé.
+            'rendement_annualise_pct': (
+                self.rendement_annualise_pct if include_rendement_annualise else None
+            ),
+
             'nb_transactions': nb_transactions,
         }
 

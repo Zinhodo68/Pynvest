@@ -100,25 +100,22 @@ def _render_content(c, is_dark, refresh, membre_data, member_param):
         # ⚡ Pré-charge valorisation, total_verse, nb_transactions en 1 query
         preload_stats(session, portefeuilles)
 
-        # DEBUG
-        print("=== DEBUG TYPES ===")
-        for i, item in enumerate(portefeuilles):
-            if not hasattr(item, 'to_dict'):
-                print(f"PROBLÈME à l'index {i} → type={type(item)}")
-        print("===================")
+
 
         # to_dict() utilise le cache → 0 lazy-load
         portefeuilles_data = []
         for item in portefeuilles:
             if isinstance(item, dict):
                 portefeuilles_data.append(item)
-            elif hasattr(item, "to_dict"):
-                portefeuilles_data.append(item.to_dict())
+            elif hasattr(item, "to_dict") and callable(item.to_dict):
+                portefeuilles_data.append(
+                    item.to_dict(include_rendement_annualise=False)
+                )
             else:
                 # Dernier recours : on essaie de convertir en dict
                 try:
                     portefeuilles_data.append(dict(item))
-                except:
+                except Exception:
                     portefeuilles_data.append(item)
 
     if not portefeuilles_data:
@@ -152,34 +149,59 @@ def _render_content(c, is_dark, refresh, membre_data, member_param):
 
 def _render_kpi_bandeau(portefeuilles_data, c, is_dark):
     """Bandeau de KPIs agrégés au-dessus de la grille."""
+    from services.perf_xirr import get_xirr_for_portefeuilles
+
     total_valo = sum(p['valorisation_actuelle'] for p in portefeuilles_data)
     total_verse = sum(p['total_verse'] for p in portefeuilles_data)
     total_pv = total_valo - total_verse
     perf_pct = (total_pv / total_verse * 100) if total_verse > 0 else 0
 
-    kpis = [
-        ('Patrimoine total', format_money(total_valo), 'account_balance_wallet', '#3b82f6'),
-        ('Capital investi', format_money(total_verse), 'savings', '#a855f7'),
-        ('+/- value latente', format_money(total_pv),
-         'trending_up' if total_pv >= 0 else 'trending_down',
-         get_perf_color(total_pv)),
-        ('Performance', format_percent(perf_pct), 'percent', get_perf_color(perf_pct)),
-        ('Nb portefeuilles', str(len(portefeuilles_data)), 'wallet', '#64748b'),
-    ]
+    portefeuille_ids = [p['id'] for p in portefeuilles_data]
+    rendement_annualise_global = get_xirr_for_portefeuilles(
+        portefeuille_ids,
+        current_value=total_valo,
+    )
 
-    with ui.row().classes('w-full gap-4 flex-nowrap mb-2'):
-        for label, value, icon, color in kpis:
-            with ui.card().classes('p-4 rounded-xl gap-1').style(
-                f'background-color: {c["card_bg"]}; '
-                f'border: 1px solid {c["card_border"]}; '
-                f'flex: 1;'
-            ):
-                with ui.row().classes('items-center justify-between w-full'):
-                    ui.label(label.upper()).classes('text-xs font-semibold tracking-wider').style(
-                        f'color: {c["text_secondary"]}'
-                    )
-                    ui.icon(icon).classes('text-base').style(f'color: {color}; opacity: 0.7;')
-                ui.label(value).classes('text-lg font-bold').style(f'color: {color}')
+    kpis = [
+        (
+            'Patrimoine total',
+            format_money(total_valo),
+            'account_balance_wallet',
+            '#3b82f6',
+        ),
+        (
+            'Capital investi',
+            format_money(total_verse),
+            'savings',
+            '#a855f7',
+        ),
+        (
+            '+/- value latente',
+            format_money(total_pv),
+            'trending_up' if total_pv >= 0 else 'trending_down',
+            get_perf_color(total_pv),
+        ),
+        (
+            'Performance',
+            format_percent(perf_pct),
+            'percent',
+            get_perf_color(perf_pct),
+        ),
+        (
+            'TRI annualisé',
+            format_percent(rendement_annualise_global)
+            if rendement_annualise_global is not None else '—',
+            'speed',
+            get_perf_color(rendement_annualise_global)
+            if rendement_annualise_global is not None else '#64748b',
+        ),
+        (
+            'Nb portefeuilles',
+            str(len(portefeuilles_data)),
+            'wallet',
+            '#64748b',
+        ),
+    ]
 
 
 # ─────────────────────────────────────────────
@@ -316,10 +338,10 @@ def _render_portefeuille_card(p, c, is_dark, refresh):
             with ui.row().classes('w-full gap-2'):
                 _stat_block('Versé', format_money(p['total_verse']), c)
                 _stat_block(
-                    'Rdt annuel',
-                    format_percent(p['rendement_annualise_pct']),
+                    'Perf.',
+                    format_percent(p['rendement_total_pct']),
                     c,
-                    color=get_perf_color(p['rendement_annualise_pct']),
+                    color=get_perf_color(p['rendement_total_pct']),
                 )
                 _stat_block('Mvts', str(p['nb_transactions']), c)
 
