@@ -839,15 +839,19 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                 ).classes('w-full')
 
         if chargeable_positions_options:
-            # 🆕 Construire 2 dicts : un pour dividendes (avec historiques),
-            # un pour frais en parts (sans historiques, car on ne peut pas
-            # débiter des parts d'un titre qu'on ne détient plus)
+            # 🆕 Construire 2 dicts identiques (actifs actifs + historiques)
+            # Les actifs historiques sont préfixés "📜 ... (vendu)" pour les
+            # distinguer visuellement. Pour les frais en parts sur un titre
+            # historique, on ne débitera pas réellement de parts (la position
+            # n'existe plus) mais on enregistrera la transaction pour la
+            # traçabilité et on imputera le montant sur le cash/Fonds €.
             dividend_options = {}
             fees_options = {}
             for idx, d in chargeable_positions_options.items():
                 if d.get('is_historical'):
-                    # Préfixe visuel pour les titres historiques
-                    dividend_options[idx] = f"📜 {d['nom']} (vendu)"
+                    label_hist = f"📜 {d['nom']} (vendu)"
+                    dividend_options[idx] = label_hist
+                    fees_options[idx] = label_hist
                 else:
                     dividend_options[idx] = d['nom']
                     fees_options[idx] = d['nom']
@@ -867,7 +871,6 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                     value=data['source_position_id']
                     if is_edit and data.get('source_position_id')
                     and data['type_operation'] == 'frais'
-                    and not str(data.get('source_position_id', '')).startswith('HIST_')
                     else None
                 ).classes('w-full')
         else:
@@ -914,6 +917,12 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
             'Quantité finale de parts *', value=0.0,
             format='%.4f', min=0, step=0.01
         ).classes('w-full')
+        # 🆕 Pour un actif historique (vendu), pas de cours actuel disponible
+        # → l'utilisateur saisit directement le montant des frais en €.
+        fees_hist_amount_input = ui.number(
+            'Montant des frais (€) *', value=0.0,
+            format='%.2f', min=0
+        ).classes('w-full')
         libelle_input = ui.input('Libellé (optionnel)', value=data['libelle']).classes('w-full')
         frais_input = ui.number('⚠️ Frais associés (€)', value=frais_existants,
                                 format='%.2f', min=0).classes('w-full')
@@ -933,10 +942,16 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                 fees_parts_to_deduct_input.value = 0.0
                 fees_final_parts_qty_input.value = 0.0
                 return
+            selected_id = fees_asset_select.value
+            # 🆕 Actif historique : pas de calcul possible (la position
+            # n'existe plus, le cours n'est pas dispo). On laisse
+            # l'utilisateur saisir le montant € directement via
+            # fees_hist_amount_input — géré dans update_visibility.
+            if _is_historical_id(selected_id):
+                return
             if last_fees_parts_input_changed['value'] == source_input:
                 last_fees_parts_input_changed['value'] = None
                 return
-            selected_id = fees_asset_select.value
             current_qty = chargeable_positions_options.get(
                 selected_id, {}).get('quantite', 0)
             current_fees_parts_qty_label.text = f"Quantité actuelle : {current_qty:g} parts"
@@ -1101,9 +1116,24 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                 reinvest_checkbox.enable()
                 reinvest_checkbox.tooltip("")
 
+            # 🆕 Si frais en parts sur historique, on imputera quand
+            # même sur le Fonds €/Cash (cf. ci-dessous), donc target_str
+            # doit refléter ce cas.
+            selected_fees_id_target = (
+                fees_asset_select.value if fees_asset_select else None
+            )
+            is_fees_in_parts_on_hist = (
+                is_fees_in_parts
+                and selected_fees_id_target is not None
+                and _is_historical_id(selected_fees_id_target)
+            )
+            effective_is_fees_in_parts = (
+                is_fees_in_parts and not is_fees_in_parts_on_hist
+            )
             target_str = (
                 "du Fonds € sélectionné"
-                if is_av_per and not is_reinvesting_dividend and not is_fees_in_parts
+                if is_av_per and not is_reinvesting_dividend
+                and not effective_is_fees_in_parts
                 else 'de la position "Cash"'
             )
 
@@ -1118,10 +1148,23 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                     f'Pas d\'impact sur le solde {target_str}.'
                 )
             elif is_fees_in_parts:
-                info_label.text = (
-                    f'⚠️ Les frais seront prélevés en parts de l\'actif sélectionné. '
-                    f'Pas d\'impact sur le solde {target_str}.'
+                # 🆕 Distinguer le cas actif historique
+                selected_fees_id_info = (
+                    fees_asset_select.value if fees_asset_select else None
                 )
+                if (selected_fees_id_info is not None
+                        and _is_historical_id(selected_fees_id_info)):
+                    info_label.text = (
+                        f'📜 Frais en parts sur un titre historiquement détenu '
+                        f'(vendu). La quantité de parts est conservée à titre '
+                        f'informatif uniquement (la position n\'existe plus). '
+                        f'Le montant saisi sera prélevé {target_str}.'
+                    )
+                else:
+                    info_label.text = (
+                        f'⚠️ Les frais seront prélevés en parts de l\'actif '
+                        f'sélectionné. Pas d\'impact sur le solde {target_str}.'
+                    )
             else:
                 messages = {
                     'versement': f'💰 Le montant viendra alimenter le solde {target_str}',
@@ -1182,13 +1225,32 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                     current_fees_parts_qty_label.set_visibility(False)
                     fees_parts_to_deduct_input.set_visibility(False)
                     fees_final_parts_qty_input.set_visibility(False)
+                    fees_hist_amount_input.set_visibility(False)
                 else:
                     montant_input.set_visibility(False)
                     if fees_asset_select:
                         fees_asset_select.set_visibility(True)
-                    current_fees_parts_qty_label.set_visibility(True)
-                    fees_parts_to_deduct_input.set_visibility(True)
-                    fees_final_parts_qty_input.set_visibility(True)
+                    # 🆕 Cas spécial : actif historique sélectionné
+                    selected_fees_id = (
+                        fees_asset_select.value if fees_asset_select else None
+                    )
+                    is_fees_on_historical = (
+                        selected_fees_id is not None
+                        and _is_historical_id(selected_fees_id)
+                    )
+                    if is_fees_on_historical:
+                        # Sans objet : pas de qty actuelle, pas de qty finale
+                        current_fees_parts_qty_label.set_visibility(False)
+                        fees_final_parts_qty_input.set_visibility(False)
+                        # On garde la qty à prélever (à titre informatif)
+                        fees_parts_to_deduct_input.set_visibility(True)
+                        # Et on affiche le champ montant € manuel
+                        fees_hist_amount_input.set_visibility(True)
+                    else:
+                        current_fees_parts_qty_label.set_visibility(True)
+                        fees_parts_to_deduct_input.set_visibility(True)
+                        fees_final_parts_qty_input.set_visibility(True)
+                        fees_hist_amount_input.set_visibility(False)
             else:
                 if dividend_source_select:
                     dividend_source_select.set_visibility(False)
@@ -1204,12 +1266,15 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                 current_fees_parts_qty_label.set_visibility(False)
                 fees_parts_to_deduct_input.set_visibility(False)
                 fees_final_parts_qty_input.set_visibility(False)
+                fees_hist_amount_input.set_visibility(False)
 
             if is_av_per and fonds_euro_select:
+                # 🆕 Le Fonds € est cible aussi pour les frais en parts
+                # sur un titre historique (impact monétaire).
                 fonds_euro_select.set_visibility(
                     val in ('versement', 'retrait', 'interets') or
                     (val == 'dividende' and not is_reinvesting_dividend) or
-                    (val == 'frais' and not is_fees_in_parts)
+                    (val == 'frais' and not effective_is_fees_in_parts)
                 )
 
             update_dynamic_fields()
@@ -1224,6 +1289,7 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
         reinvest_checkbox.on('update:model-value', update_visibility)
         fee_type_toggle.on('update:model-value', update_visibility)
         if fees_asset_select:
+            fees_asset_select.on('update:model-value', update_visibility)
             fees_asset_select.on('update:model-value',
                                  lambda: update_fees_parts_amounts('deduct_qty'))
             fees_asset_select.on('update:model-value', update_dynamic_fields)
@@ -1291,16 +1357,31 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                         if not fees_asset_select or not fees_asset_select.value:
                             ui.notify("Sélectionnez l'actif à débiter.", type='negative')
                             return
-                        if not parts_a_prelever_frais or parts_a_prelever_frais <= 0:
-                            ui.notify("La quantité doit être > 0.", type='negative')
-                            return
-                        selected_asset_qty = chargeable_positions_options.get(
-                            fees_asset_select.value, {}).get('quantite', 0)
-                        if parts_a_prelever_frais > selected_asset_qty:
-                            ui.notify(
-                                f"Parts insuffisantes. Dispo: {selected_asset_qty:g}",
-                                type='negative')
-                            return
+                        # 🆕 Cas actif historique : on valide le montant €
+                        # saisi manuellement plutôt que la quantité de parts.
+                        if _is_historical_id(fees_asset_select.value):
+                            montant_hist = float(fees_hist_amount_input.value or 0)
+                            if montant_hist <= 0:
+                                ui.notify(
+                                    "Le montant des frais doit être > 0.",
+                                    type='negative')
+                                return
+                            if is_av_per and (
+                                    not fonds_euro_select or not fonds_euro_select.value):
+                                ui.notify("Sélectionnez un Fonds € cible.",
+                                          type='negative')
+                                return
+                        else:
+                            if not parts_a_prelever_frais or parts_a_prelever_frais <= 0:
+                                ui.notify("La quantité doit être > 0.", type='negative')
+                                return
+                            selected_asset_qty = chargeable_positions_options.get(
+                                fees_asset_select.value, {}).get('quantite', 0)
+                            if parts_a_prelever_frais > selected_asset_qty:
+                                ui.notify(
+                                    f"Parts insuffisantes. Dispo: {selected_asset_qty:g}",
+                                    type='negative')
+                                return
                     else:
                         if not montant_val_for_tx or montant_val_for_tx <= 0:
                             ui.notify("Le montant doit être positif.", type='negative')
@@ -1460,30 +1541,73 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
 
                     elif type_val == 'frais':
                         if is_fees_in_parts_current_state:
-                            source_pos = session.get(Position, fees_asset_select.value)
-                            price_at_deduction = source_pos.cours_actuel or 0
-                            if price_at_deduction == 0:
-                                ui.notify(
-                                    f"Cours actuel de {source_pos.nom} = 0.",
-                                    type='negative')
-                                session.rollback()
-                                return
-                            montant_frais = parts_a_prelever_frais * price_at_deduction
-                            source_pos.quantite -= parts_a_prelever_frais
-                            t_final = Transaction(
-                                portefeuille_id=portefeuille_id,
-                                date_operation=date_val,
-                                type_operation='frais',
-                                montant=montant_frais,
-                                libelle=libelle,
-                                nom_titre=source_pos.nom,
-                                ticker=source_pos.ticker,
-                                code=source_pos.code,
-                                categorie=source_pos.categorie,
-                                quantite=parts_a_prelever_frais,
-                                prix_unitaire=price_at_deduction,
-                            )
-                            session.add(t_final)
+                            # 🆕 Cas actif historique : pas de Position
+                            # à débiter, on saisit le montant en € et on
+                            # impacte le cash / Fonds €. La quantité de
+                            # parts saisie (si > 0) est conservée à titre
+                            # informatif dans la transaction.
+                            if _is_historical_id(fees_asset_select.value):
+                                hist_info = chargeable_positions_options[
+                                    fees_asset_select.value]
+                                montant_frais = float(
+                                    fees_hist_amount_input.value or 0)
+                                qty_info = (parts_a_prelever_frais
+                                            if parts_a_prelever_frais > 0 else None)
+                                pu_info = (
+                                    (montant_frais / parts_a_prelever_frais)
+                                    if (qty_info and parts_a_prelever_frais > 0)
+                                    else None
+                                )
+                                t_final = Transaction(
+                                    portefeuille_id=portefeuille_id,
+                                    date_operation=date_val,
+                                    type_operation='frais',
+                                    montant=montant_frais,
+                                    libelle=libelle,
+                                    nom_titre=hist_info['nom'],
+                                    ticker=hist_info['ticker'],
+                                    code=hist_info['code'],
+                                    categorie=hist_info['categorie'],
+                                    quantite=qty_info,
+                                    prix_unitaire=pu_info,
+                                )
+                                session.add(t_final)
+                                session.flush()
+                                if is_av_per:
+                                    update_fonds_euro(
+                                        fonds_euro_select.value, type_val,
+                                        montant_frais)
+                                else:
+                                    ajuster_cash(
+                                        session, portefeuille_id,
+                                        impact_cash(type_val, montant_frais))
+                            else:
+                                source_pos = session.get(
+                                    Position, fees_asset_select.value)
+                                price_at_deduction = source_pos.cours_actuel or 0
+                                if price_at_deduction == 0:
+                                    ui.notify(
+                                        f"Cours actuel de {source_pos.nom} = 0.",
+                                        type='negative')
+                                    session.rollback()
+                                    return
+                                montant_frais = (
+                                    parts_a_prelever_frais * price_at_deduction)
+                                source_pos.quantite -= parts_a_prelever_frais
+                                t_final = Transaction(
+                                    portefeuille_id=portefeuille_id,
+                                    date_operation=date_val,
+                                    type_operation='frais',
+                                    montant=montant_frais,
+                                    libelle=libelle,
+                                    nom_titre=source_pos.nom,
+                                    ticker=source_pos.ticker,
+                                    code=source_pos.code,
+                                    categorie=source_pos.categorie,
+                                    quantite=parts_a_prelever_frais,
+                                    prix_unitaire=price_at_deduction,
+                                )
+                                session.add(t_final)
                         else:
                             t_final = Transaction(
                                 portefeuille_id=portefeuille_id,

@@ -217,7 +217,7 @@ def _render_position_row(pos, c, portefeuille_id, refresh, refresh_chart=None):
         if not is_cash and not is_reserve:
             # En combinant 'context-menu' et 'touch-position', Quasar gère l'ouverture
             # au clic droit à l'emplacement précis du curseur.
-            with ui.menu().props('auto-close context-menu touch-position'):
+            with ui.context_menu():
                 with ui.row().classes('items-center gap-2 px-3 py-2').style(
                     'pointer-events: none;'
                 ):

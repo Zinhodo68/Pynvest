@@ -100,8 +100,26 @@ def _render_content(c, is_dark, refresh, membre_data, member_param):
         # ⚡ Pré-charge valorisation, total_verse, nb_transactions en 1 query
         preload_stats(session, portefeuilles)
 
+        # DEBUG
+        print("=== DEBUG TYPES ===")
+        for i, item in enumerate(portefeuilles):
+            if not hasattr(item, 'to_dict'):
+                print(f"PROBLÈME à l'index {i} → type={type(item)}")
+        print("===================")
+
         # to_dict() utilise le cache → 0 lazy-load
-        portefeuilles_data = [p.to_dict() for p in portefeuilles]
+        portefeuilles_data = []
+        for item in portefeuilles:
+            if isinstance(item, dict):
+                portefeuilles_data.append(item)
+            elif hasattr(item, "to_dict"):
+                portefeuilles_data.append(item.to_dict())
+            else:
+                # Dernier recours : on essaie de convertir en dict
+                try:
+                    portefeuilles_data.append(dict(item))
+                except:
+                    portefeuilles_data.append(item)
 
     if not portefeuilles_data:
         with ui.card().classes('w-full p-12 rounded-xl items-center').style(

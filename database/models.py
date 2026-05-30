@@ -144,31 +144,13 @@ class Portefeuille(Base):
 
     @property
     def rendement_annualise_pct(self):
-        """Rendement annualisé (CAGR).
+        from services.perf_annuelle import get_rendement_annualise_time_weighted
+        try:
+            return get_rendement_annualise_time_weighted(self.id)
+        except Exception:
+            return 0.0
 
-        Utilise les valeurs du cache si disponible,
-        sinon retombe sur les @property (lazy-load).
-        """
-        if self._stats_cache is not None:
-            total_verse = self._stats_cache['total_verse']
-            valorisation = self._stats_cache['valorisation_actuelle']
-        else:
-            total_verse = self.total_verse
-            valorisation = self.valorisation_actuelle
-
-        if not self.date_creation or total_verse <= 0:
-            return 0.0
-        from datetime import date as _date
-        nb_jours = (_date.today() - self.date_creation).days
-        if nb_jours <= 0:
-            return 0.0
-        nb_annees = nb_jours / 365.25
-        if nb_annees < 0.1:
-            return 0.0
-        ratio = valorisation / total_verse
-        if ratio <= 0:
-            return 0.0
-        return (ratio ** (1 / nb_annees) - 1) * 100
+    @property
 
     # ──────────────────────────────────────────────────────────────────────
     # Sérialisation

@@ -5,17 +5,7 @@ Au lieu de charger toutes les positions/transactions en mémoire et d'itérer
 en Python (lazy loading N+1), on utilise des requêtes SQL agrégées (SUM, CASE,
 COUNT) qui retournent tous les résultats en une seule requête.
 
-Usage ::
-    from services.portfolio_stats import preload_stats
-
-    with get_session() as session:
-        portefeuilles = session.execute(select(Portefeuille)).scalars().all()
-        preload_stats(session, portefeuilles)
-        data = [p.to_dict() for p in portefeuilles]   # 0 lazy-load !
-
 Le cache est stocké sur chaque instance Portefeuille._stats_cache.
-Les @property du modèle consultent ce cache en priorité, et retombent
-sur le lazy loading si le cache n'est pas rempli (backward compatible).
 """
 
 from __future__ import annotations
@@ -30,11 +20,7 @@ def preload_stats(session: Session, portefeuilles: list) -> None:
     """Pré-charge les stats agrégées sur les instances de Portefeuille.
 
     Remplit le cache ``_stats_cache`` de chaque instance via **une seule
-    requête SQL**, évitant N+1 requêtes lors de l'appel à ``to_dict()``.
-
-    Args:
-        session:          Session SQLAlchemy active.
-        portefeuilles:    Liste d'instances Portefeuille (déjà chargées).
+    requête SQL**, évitant N+1 requêtes.
     """
     if not portefeuilles:
         return
@@ -42,8 +28,6 @@ def preload_stats(session: Session, portefeuilles: list) -> None:
     ids = [p.id for p in portefeuilles]
 
     # ── Sub-query 1 : valorisation par portefeuille ──────────────────────
-    # SUM(quantite * CASE WHEN cours_actuel IS NOT NULL
-    #                      THEN cours_actuel ELSE prix_moyen END)
     valo_sq = (
         select(
             Position.portefeuille_id,
@@ -64,8 +48,6 @@ def preload_stats(session: Session, portefeuilles: list) -> None:
     )
 
     # ── Sub-query 2 : total_verse par portefeuille (hors arbitrages) ────
-    # SUM(CASE versement THEN +montant / retrait THEN -montant ELSE 0)
-    # WHERE parent_transaction_id IS NULL
     verse_sq = (
         select(
             Transaction.portefeuille_id,
@@ -88,7 +70,7 @@ def preload_stats(session: Session, portefeuilles: list) -> None:
         .subquery()
     )
 
-    # ── Sub-query 3 : nb_transactions total (y compris arbitrages) ──────
+    # ── Sub-query 3 : nb_transactions total ─────────────────────────────
     nb_tx_sq = (
         select(
             Transaction.portefeuille_id,
@@ -99,7 +81,7 @@ def preload_stats(session: Session, portefeuilles: list) -> None:
         .subquery()
     )
 
-    # ── Requête principale : JOIN des 3 sub-queries ─────────────────────
+    # ── Requête principale ──────────────────────────────────────────────
     stmt = (
         select(
             Portefeuille.id,
@@ -114,8 +96,6 @@ def preload_stats(session: Session, portefeuilles: list) -> None:
     )
 
     rows = session.execute(stmt).all()
-
-    # ── Mapping résultats → instances ────────────────────────────────────
     results_map = {row.id: row for row in rows}
 
     for p in portefeuilles:
@@ -130,22 +110,15 @@ def preload_stats(session: Session, portefeuilles: list) -> None:
                 "valorisation_actuelle": valorisation,
                 "total_verse": total_verse,
                 "plus_value": plus_value,
-                "rendement_total_pct": (
-                    (plus_value / total_verse * 100) if total_verse > 0 else 0.0
-                ),
+                "rendement_total_pct": (plus_value / total_verse * 100) if total_verse > 0 else 0.0,
                 "nb_transactions": int(row.nb_transactions or 0),
             }
         else:
-            # Portefeuille sans positions ni transactions
             p._stats_cache = _empty_stats()
 
 
 def preload_single(session: Session, portefeuille_id: int) -> dict | None:
-    """Raccourci : charge un portefeuille + ses stats en 2 requêtes.
-
-    Returns:
-        Le dict de stats, ou None si le portefeuille n'existe pas.
-    """
+    """Raccourci : charge un portefeuille + ses stats en 2 requêtes."""
     p = session.get(Portefeuille, portefeuille_id)
     if p is None:
         return None

@@ -46,7 +46,12 @@ def _render_content(portefeuille_id, c, is_dark, refresh):
 
         preload_stats(session, [p])
 
-        data = p.to_dict()
+        # ✅ data doit être un dictionnaire, pas une liste
+        data = p.to_dict() if hasattr(p, "to_dict") else {
+            'id': p.id,
+            'type': p.type,
+        }
+
         valorisations = [
             {'date': v.date_valeur.isoformat(), 'montant': v.montant}
             for v in p.valorisations
