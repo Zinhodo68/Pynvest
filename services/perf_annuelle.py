@@ -1,23 +1,15 @@
 """Calcul des rendements annuels (Modified Dietz) + rendement annualisé temps-pondéré."""
-from datetime import date
+from datetime import date, timedelta
 from database.db import get_session
 from database.models import Portefeuille
 from pages.portefeuille_detail._releve_annuel import get_situation_at_date
 
 
 def _is_external_flow(t) -> bool:
+    """Détermine si une transaction est un flux externe (apport/retrait de capital)."""
     if t.parent_transaction_id is not None:
         return False
-    if t.type_operation not in ('versement', 'retrait'):
-        return False
-
-    LIQUIDITY_CATEGORIES = {'Fonds €', 'Fonds Euro', 'Cash'}
-    is_asset_specific = bool((t.ticker or t.code or t.nom_titre) and t.quantite is not None)
-
-    if is_asset_specific:
-        return t.categorie in LIQUIDITY_CATEGORIES
-    else:
-        return True
+    return t.type_operation in ('versement', 'retrait')
 
 
 def get_rendements_annuels(portefeuille_id: int, max_years: int = 10) -> list[dict]:
@@ -28,19 +20,26 @@ def get_rendements_annuels(portefeuille_id: int, max_years: int = 10) -> list[di
         if not ptf or not ptf.transactions:
             return []
 
-        first_year = min(t.date_operation.year for t in ptf.transactions)
+        # On trie les transactions par date
+        sorted_txs = sorted(ptf.transactions, key=lambda t: t.date_operation)
+        first_year = sorted_txs[0].date_operation.year
         years = list(range(first_year, today.year + 1))[-max_years:]
 
         rendements = []
 
         for year in years:
-            debut = date(year, 1, 1)
+            debut_annee = date(year, 1, 1)
+            # Pour la première année, le début est la date de la première transaction
+            debut = max(debut_annee, sorted_txs[0].date_operation) if year == first_year else debut_annee
             fin = date(year, 12, 31) if year < today.year else today
+
             nb_jours = (fin - debut).days + 1
+            if nb_jours <= 0:
+                continue
 
             situation_debut = get_situation_at_date(
                 portefeuille_id,
-                date(year - 1, 12, 31) if year > first_year else debut
+                date(year - 1, 12, 31) if year > first_year else (debut - timedelta(days=1))
             )
             situation_fin = get_situation_at_date(portefeuille_id, fin)
 
@@ -88,15 +87,35 @@ def get_rendements_annuels(portefeuille_id: int, max_years: int = 10) -> list[di
 
 
 def get_rendement_annualise_time_weighted(portefeuille_id: int) -> float:
-    """Rendement annualisé temps-pondéré (TWR)."""
+    """Rendement annualisé temps-pondéré (TWR) basé sur la durée réelle."""
+    with get_session() as session:
+        ptf = session.get(Portefeuille, portefeuille_id)
+        if not ptf or not ptf.transactions:
+            return 0.0
+
+        # Date de début réelle
+        first_date = min(t.date_operation for t in ptf.transactions)
+        today = date.today()
+        nb_jours_total = (today - first_date).days
+
+        if nb_jours_total <= 0:
+            return 0.0
+
+        nb_annees_reelles = nb_jours_total / 365.25
+
     rendements = get_rendements_annuels(portefeuille_id, max_years=20)
     if not rendements:
         return 0.0
 
+    # On compose les rendements annuels (Modified Dietz par an)
     rendements = sorted(rendements, key=lambda r: r['annee'])
     cumulative = 1.0
     for r in rendements:
         cumulative *= (1 + r['rendement_pct'] / 100)
+
+    # Annualisation sur la durée réelle totale
+    twr_annualise = (cumulative ** (1 / nb_annees_reelles) - 1) * 100
+    return round(twr_annualise, 2)
 
     nb_annees = len(rendements)
     if nb_annees == 0:

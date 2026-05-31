@@ -103,18 +103,22 @@ def preload_stats(session: Session, portefeuilles: list) -> None:
 
         if row is not None:
             valorisation = float(row.valorisation_actuelle or 0)
+            # ✨ Si pas de positions, on regarde peut-être les valorisations manuelles historiques
+            if valorisation == 0 and p.valorisations:
+                valorisation = float(p.valorisations[-1].montant)
+
             total_verse = float(row.total_verse or 0)
             plus_value = valorisation - total_verse
 
-            p._stats_cache = {
-                "valorisation_actuelle": valorisation,
-                "total_verse": total_verse,
-                "plus_value": plus_value,
-                "rendement_total_pct": (plus_value / total_verse * 100) if total_verse > 0 else 0.0,
-                "nb_transactions": int(row.nb_transactions or 0),
-            }
-        else:
-            p._stats_cache = _empty_stats()
+        p._stats_cache = {
+            "valorisation_actuelle": valorisation,
+            "total_verse": total_verse,
+            "plus_value": plus_value,
+            "rendement_total_pct": (plus_value / total_verse * 100) if total_verse > 0 else 0.0,
+            "nb_transactions": int(row.nb_transactions or 0),
+        }
+    else:
+        p._stats_cache = _empty_stats()
 
 
 def preload_single(session: Session, portefeuille_id: int) -> dict | None:

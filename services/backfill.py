@@ -149,8 +149,8 @@ def _build_arbitrage_parent_ids(transactions: list) -> set:
 def _is_arbitrage_internal(t, arbitrage_parent_ids: set) -> bool:
     """Détermine si une transaction est partie d'un arbitrage interne."""
     is_arb_child = (
-        t.parent_transaction_id is not None
-        and t.type_operation in ARBITRAGE_CHILD_TYPES
+            t.parent_transaction_id is not None
+            and t.type_operation in ARBITRAGE_CHILD_TYPES
     )
     is_arb_parent = t.id in arbitrage_parent_ids
     return is_arb_child or is_arb_parent
@@ -220,138 +220,165 @@ def backfill_valorisations(portefeuille_id: int) -> int:
         tx_index = 0
         current_date = start_date
 
-        while current_date <= end_date:
-            while tx_index < len(transactions) and transactions[tx_index].date_operation <= current_date:
-                t = transactions[tx_index]
+        # Étape 1 : Calculer les positions (Quantité, PRU)
+        for t in transactions:
+            key = t.ticker or t.code or t.nom_titre
+            is_asset_specific_tx = bool(key and t.quantite is not None)
+            is_internal = _is_arbitrage_internal(t, arbitrage_parent_ids)
 
-                key = t.ticker or t.code or t.nom_titre
-                is_asset_specific_tx = bool(key and t.quantite is not None)
-                is_internal = _is_arbitrage_internal(t, arbitrage_parent_ids)
-
-                # ─────────────────────────────────────────────
-                # VERSEMENT
-                # ─────────────────────────────────────────────
-                if t.type_operation == 'versement':
-                    if is_asset_specific_tx:
-                        if key in positions_held:
-                            positions_held[key]['quantite'] += t.quantite
-                        else:
-                            positions_held[key] = {
-                                'ticker': t.ticker,
-                                'quantite': t.quantite,
-                                'pru': t.prix_unitaire if t.prix_unitaire is not None else 1.0,
-                                'nom': t.nom_titre,
-                                'categorie': t.categorie,
-                            }
+            # ... (logique de mise à jour des positions et du cash identique)
+            # ─────────────────────────────────────────────
+            # VERSEMENT
+            # ─────────────────────────────────────────────
+            if t.type_operation == 'versement':
+                if is_asset_specific_tx:
+                    if key in positions_held:
+                        positions_held[key]['quantite'] += t.quantite
                     else:
-                        if not is_internal:
-                            cash += t.montant
-
-                # ─────────────────────────────────────────────
-                # RETRAIT
-                # ─────────────────────────────────────────────
-                elif t.type_operation == 'retrait':
-                    if is_asset_specific_tx:
-                        if key in positions_held:
-                            positions_held[key]['quantite'] -= t.quantite
-                    else:
-                        if not is_internal:
-                            cash -= t.montant
-
-                # ─────────────────────────────────────────────
-                # INTÉRÊTS (Fonds €)
-                # ─────────────────────────────────────────────
-                elif t.type_operation == 'interets':
-                    if is_asset_specific_tx:
-                        if key in positions_held:
-                            positions_held[key]['quantite'] += t.quantite
-                        else:
-                            positions_held[key] = {
-                                'ticker': t.ticker,
-                                'quantite': t.quantite,
-                                'pru': t.prix_unitaire if t.prix_unitaire is not None else 1.0,
-                                'nom': t.nom_titre,
-                                'categorie': t.categorie,
-                            }
-                    else:
-                        cash += t.montant
-
-                # ─────────────────────────────────────────────
-                # DIVIDENDE
-                # ─────────────────────────────────────────────
-                elif t.type_operation == 'dividende':
-                    if is_asset_specific_tx:
-                        if key in positions_held:
-                            old = positions_held[key]
-                            new_qte = old['quantite'] + t.quantite
-                            new_pru = (
-                                (old['quantite'] * old['pru']) +
-                                (t.quantite * (t.prix_unitaire or 0))
-                            ) / new_qte if new_qte > 0 else (t.prix_unitaire or 0)
-                            old['quantite'] = new_qte
-                            old['pru'] = new_pru
-                        else:
-                            positions_held[key] = {
-                                'ticker': t.ticker,
-                                'quantite': t.quantite,
-                                'pru': t.prix_unitaire,
-                                'nom': t.nom_titre,
-                                'categorie': t.categorie,
-                            }
-                    else:
-                        cash += t.montant
-
-                # ─────────────────────────────────────────────
-                # FRAIS
-                # ─────────────────────────────────────────────
-                elif t.type_operation == 'frais':
-                    if is_asset_specific_tx:
-                        if key in positions_held:
-                            positions_held[key]['quantite'] -= t.quantite
-                    else:
-                        cash -= t.montant
-
-                # ─────────────────────────────────────────────
-                # ACHAT
-                # ─────────────────────────────────────────────
-                elif t.type_operation == 'achat':
-                    if not is_internal:
-                        cash -= t.montant
-
-                    if t.quantite is not None and t.prix_unitaire is not None:
-                        if key in positions_held:
-                            old = positions_held[key]
-                            new_qte = old['quantite'] + t.quantite
-                            new_pru = (
-                                (old['quantite'] * old['pru']) +
-                                (t.quantite * t.prix_unitaire)
-                            ) / new_qte if new_qte > 0 else t.prix_unitaire
-                            old['quantite'] = new_qte
-                            old['pru'] = new_pru
-                        else:
-                            positions_held[key] = {
-                                'ticker': t.ticker,
-                                'quantite': t.quantite,
-                                'pru': t.prix_unitaire,
-                                'nom': t.nom_titre,
-                                'categorie': t.categorie,
-                            }
-
-                # ─────────────────────────────────────────────
-                # VENTE
-                # ─────────────────────────────────────────────
-                elif t.type_operation == 'vente':
+                        positions_held[key] = {
+                            'ticker': t.ticker,
+                            'quantite': t.quantite,
+                            'pru': t.prix_unitaire if t.prix_unitaire is not None else 1.0,
+                            'nom': t.nom_titre,
+                            'categorie': t.categorie,
+                        }
+                else:
                     if not is_internal:
                         cash += t.montant
 
-                    if t.quantite is not None and key in positions_held:
+            # ─────────────────────────────────────────────
+            # RETRAIT
+            # ─────────────────────────────────────────────
+            elif t.type_operation == 'retrait':
+                if is_asset_specific_tx:
+                    if key in positions_held:
                         positions_held[key]['quantite'] -= t.quantite
+                else:
+                    if not is_internal:
+                        cash -= t.montant
 
-                # ✅ NETTOYAGE : Supprime la ligne si la quantité détenue devient nulle (seuil d'arrondi)
-                if key in positions_held and positions_held[key]['quantite'] <= 1e-9:
-                    del positions_held[key]
+            # ─────────────────────────────────────────────
+            # INTÉRÊTS (Fonds €)
+            # ─────────────────────────────────────────────
+            elif t.type_operation == 'interets':
+                if is_asset_specific_tx:
+                    if key in positions_held:
+                        positions_held[key]['quantite'] += t.quantite
+                    else:
+                        positions_held[key] = {
+                            'ticker': t.ticker,
+                            'quantite': t.quantite,
+                            'pru': t.prix_unitaire if t.prix_unitaire is not None else 1.0,
+                            'nom': t.nom_titre,
+                            'categorie': t.categorie,
+                        }
+                else:
+                    cash += t.montant
 
-                tx_index += 1
+            # ─────────────────────────────────────────────
+            # DIVIDENDE
+            # ─────────────────────────────────────────────
+            elif t.type_operation == 'dividende':
+                if is_asset_specific_tx:
+                    if key in positions_held:
+                        old = positions_held[key]
+                        new_qte = old['quantite'] + t.quantite
+                        new_pru = (
+                                          (old['quantite'] * old['pru']) +
+                                          (t.quantite * (t.prix_unitaire or 0))
+                                  ) / new_qte if new_qte > 0 else (t.prix_unitaire or 0)
+                        old['quantite'] = new_qte
+                        old['pru'] = new_pru
+                    else:
+                        positions_held[key] = {
+                            'ticker': t.ticker,
+                            'quantite': t.quantite,
+                            'pru': t.prix_unitaire,
+                            'nom': t.nom_titre,
+                            'categorie': t.categorie,
+                        }
+                else:
+                    cash += t.montant
+
+            # ─────────────────────────────────────────────
+            # FRAIS
+            # ─────────────────────────────────────────────
+            elif t.type_operation == 'frais':
+                if is_asset_specific_tx:
+                    if key in positions_held:
+                        positions_held[key]['quantite'] -= t.quantite
+                else:
+                    cash -= t.montant
+
+            # ─────────────────────────────────────────────
+            # ACHAT
+            # ─────────────────────────────────────────────
+            elif t.type_operation == 'achat':
+                if not is_internal:
+                    cash -= t.montant
+
+                if t.quantite is not None and t.prix_unitaire is not None:
+                    if key in positions_held:
+                        old = positions_held[key]
+                        new_qte = old['quantite'] + t.quantite
+                        new_pru = (
+                                          (old['quantite'] * old['pru']) +
+                                          (t.quantite * t.prix_unitaire)
+                                  ) / new_qte if new_qte > 0 else t.prix_unitaire
+                        old['quantite'] = new_qte
+                        old['pru'] = new_pru
+                    else:
+                        positions_held[key] = {
+                            'ticker': t.ticker,
+                            'quantite': t.quantite,
+                            'pru': t.prix_unitaire,
+                            'nom': t.nom_titre,
+                            'categorie': t.categorie,
+                        }
+
+            # ─────────────────────────────────────────────
+            # VENTE
+            # ─────────────────────────────────────────────
+            elif t.type_operation == 'vente':
+                if not is_internal:
+                    cash += t.montant
+
+                if t.quantite is not None and key in positions_held:
+                    positions_held[key]['quantite'] -= t.quantite
+
+            # ✅ NETTOYAGE : Supprime la ligne si la quantité détenue devient nulle (seuil d'arrondi)
+            if key in positions_held and positions_held[key]['quantite'] <= 1e-9:
+                del positions_held[key]
+
+            tx_index += 1
+
+        # 🔄 APRÈS avoir calculé l'état final, on essaie de mettre à jour les cours actuels
+        # si ce n'est pas un support manuel
+        for key, pos in positions_held.items():
+            ticker = pos.get('ticker')
+            if ticker:
+                # On essaie de récupérer le dernier cours connu en BDD
+                last_cours = session.execute(
+                    select(CoursHistorique.cours)
+                    .where(CoursHistorique.ticker == ticker)
+                    .order_by(CoursHistorique.date_cours.desc())
+                    .limit(1)
+                    .scalar_one_or_none())
+
+                # Mise à jour de la table 'positions' pour l'affichage temps réel
+                existing_pos = session.execute(
+                    select(Position).where(
+                        Position.portefeuille_id == portefeuille_id,
+                        (Position.ticker == ticker) | (Position.nom == pos['nom'])
+                    )
+                ).scalar_one_or_none()
+
+                if existing_pos and last_cours:
+                    existing_pos.cours_actuel = last_cours
+                    existing_pos.prix_moyen = pos['pru']
+                    existing_pos.quantite = pos['quantite']
+
+            # (Reprise de la boucle de valorisation quotidienne...)
 
             # ─────────────────────────────────────────────
             # Calcul de la valorisation des titres détenus

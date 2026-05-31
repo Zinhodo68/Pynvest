@@ -82,6 +82,20 @@ def get_situation_at_date(portefeuille_id: int, target_date: date) -> dict:
                     last = c
                 else:
                     break
+
+            # Si on n'a pas trouvé de cours historique (par ex. ticker invalide
+            # ou pas de données pour cette période), on cherche le cours actuel
+            # dans la table positions pour les relevés récents
+            if last is None and target >= date.today():
+                with get_session() as s:
+                    pos_db = s.execute(
+                        select(Position.cours_actuel)
+                        .where(Position.portefeuille_id == portefeuille_id,
+                               Position.ticker == ticker)
+                    ).scalar_one_or_none()
+                    if pos_db:
+                        return pos_db
+
             return last
 
         cash = 0.0
@@ -110,37 +124,24 @@ def get_situation_at_date(portefeuille_id: int, target_date: date) -> dict:
                             'quantite': t.quantite,
                             'pru': t.prix_unitaire if t.prix_unitaire is not None else 1.0,
                         }
-                    # 🆕 Versement asset-specific sur Fonds €/Cash = vrai apport externe
-                    # (sauf si c'est un enfant d'arbitrage)
-                    if (not is_internal
-                            and t.categorie in ('Fonds €', 'Fonds Euro', 'Cash')):
-                        total_verse += t.montant
                 else:
                     cash += t.montant
-                    if not is_internal:
-                        total_verse += t.montant
+
+                # Tout versement non-interne est un apport externe
+                if not is_internal:
+                    total_verse += t.montant
 
 
             elif t.type_operation == 'retrait':
-
                 if is_asset_specific_tx:
-
                     if key in positions_held:
                         positions_held[key]['quantite'] -= t.quantite
-
-                    # 🆕 Retrait asset-specific depuis Fonds €/Cash = vrai retrait externe
-
-                    if (not is_internal
-
-                            and t.categorie in ('Fonds €', 'Fonds Euro', 'Cash')):
-                        total_verse -= t.montant
-
                 else:
-
                     cash -= t.montant
 
-                    if not is_internal:
-                        total_verse -= t.montant
+                # Tout retrait non-interne est une sortie externe
+                if not is_internal:
+                    total_verse -= t.montant
 
             elif t.type_operation == 'interets':
                 if is_asset_specific_tx:
@@ -162,9 +163,9 @@ def get_situation_at_date(portefeuille_id: int, target_date: date) -> dict:
                         old = positions_held[key]
                         new_qte = old['quantite'] + t.quantite
                         new_pru = (
-                            (old['quantite'] * old['pru']) +
-                            (t.quantite * (t.prix_unitaire or 0))
-                        ) / new_qte if new_qte > 0 else (t.prix_unitaire or 0)
+                                          (old['quantite'] * old['pru']) +
+                                          (t.quantite * (t.prix_unitaire or 0))
+                                  ) / new_qte if new_qte > 0 else (t.prix_unitaire or 0)
                         old['quantite'] = new_qte
                         old['pru'] = new_pru
                     else:
@@ -192,9 +193,9 @@ def get_situation_at_date(portefeuille_id: int, target_date: date) -> dict:
                         old = positions_held[key]
                         new_qte = old['quantite'] + t.quantite
                         new_pru = (
-                            (old['quantite'] * old['pru']) +
-                            (t.quantite * t.prix_unitaire)
-                        ) / new_qte if new_qte > 0 else t.prix_unitaire
+                                          (old['quantite'] * old['pru']) +
+                                          (t.quantite * t.prix_unitaire)
+                                  ) / new_qte if new_qte > 0 else t.prix_unitaire
                         old['quantite'] = new_qte
                         old['pru'] = new_pru
                     else:
@@ -254,7 +255,7 @@ def get_situation_at_date(portefeuille_id: int, target_date: date) -> dict:
         valo_totale = cash + valo_titres
         plus_value_globale = valo_totale - total_verse
         pv_pct_globale = (
-            plus_value_globale / total_verse * 100
+                plus_value_globale / total_verse * 100
         ) if total_verse > 0 else 0
 
         return {
@@ -281,13 +282,18 @@ def get_available_years(portefeuille_id: int) -> list[int]:
         first_year = min(t.date_operation.year for t in ptf.transactions)
         current_year = date.today().year
 
-        years = list(range(first_year, current_year))
+        years = list(range(first_year, current_year + 1))
         return sorted(years, reverse=True)
 
 
 def show_releve_annuel(portefeuille_id: int, annee: int, c, is_dark):
-    """Affiche le popup avec la situation du portefeuille au 31/12 de l'année."""
-    target_date = date(annee, 12, 31)
+    """Affiche le popup avec la situation du portefeuille à la fin de l'année (ou aujourd'hui)."""
+    today = date.today()
+    if annee == today.year:
+        target_date = today
+    else:
+        target_date = date(annee, 12, 31)
+
     situation = get_situation_at_date(portefeuille_id, target_date)
 
     if situation is None:

@@ -8,27 +8,10 @@ from database.models import Transaction
 
 
 def _is_external_flow(t) -> bool:
-    """
-    Détermine si une transaction est un flux externe réel :
-    - versement
-    - retrait
-
-    On ignore les arbitrages internes.
-    """
+    """Détermine si une transaction est un flux externe (apport/retrait de capital)."""
     if t.parent_transaction_id is not None:
         return False
-
-    if t.type_operation not in ('versement', 'retrait'):
-        return False
-
-    # Même logique que dans perf_annuelle.py
-    liquidity_categories = {'Fonds €', 'Fonds Euro', 'Cash'}
-    is_asset_specific = bool((t.ticker or t.code or t.nom_titre) and t.quantite is not None)
-
-    if is_asset_specific:
-        return t.categorie in liquidity_categories
-
-    return True
+    return t.type_operation in ('versement', 'retrait')
 
 
 def _xirr(flows: list[tuple[date, float]]) -> float | None:
