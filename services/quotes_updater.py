@@ -98,31 +98,62 @@ def update_all_quotes(force: bool = False) -> dict:
                 if key in new_quotes:
                     pos.cours_actuel = new_quotes[key]
 
-        # 4bis. FALLBACK : Recherche du dernier prix d'achat
+        # 4bis. FALLBACK : dernier cours CONNU (cours saisi le plus récent)
+        #   → On ne se base PLUS sur le PRU (prix_moyen) comme cours actuel.
+        #   On cherche d'abord le dernier cours stocké dans CoursHistorique
+        #   (reconstruit depuis les achats/ventes par le backfill), puis, à
+        #   défaut, le prix unitaire de la transaction achat OU vente la plus
+        #   récente pour ce titre.
         for pos in positions:
             key = pos.ticker or pos.code
             is_failed_auto = pos.auto_update and key not in new_quotes
 
             if not pos.auto_update or is_failed_auto:
 
-                # Création dynamique des conditions pour éviter le bug des valeurs "NULL"
-                conditions = [Transaction.nom_titre == pos.nom]
+                # 1) Dernier cours connu en historique (ticker ou ISIN)
+                hist_conditions = []
                 if pos.ticker:
-                    conditions.append(Transaction.ticker == pos.ticker)
+                    hist_conditions.append(CoursHistorique.ticker == pos.ticker)
                 if pos.code:
-                    conditions.append(Transaction.code == pos.code)
+                    hist_conditions.append(CoursHistorique.isin == pos.code)
 
-                # Recherche de la dernière transaction d'achat pour CE titre exact
-                last_buy = session.execute(
-                    select(Transaction).where(
-                        Transaction.portefeuille_id == pos.portefeuille_id,
-                        Transaction.type_operation == 'achat',
-                        or_(*conditions)
-                    ).order_by(Transaction.date_operation.desc(), Transaction.id.desc())
-                ).scalars().first()
+                last_cours = None
+                if hist_conditions:
+                    last_cours = session.execute(
+                        select(CoursHistorique.cours).where(
+                            or_(*hist_conditions)
+                        ).order_by(
+                            CoursHistorique.date_cours.desc(),
+                            CoursHistorique.id.desc(),
+                        )
+                    ).scalars().first()
 
-                if last_buy and last_buy.prix_unitaire:
-                    pos.cours_actuel = last_buy.prix_unitaire
+                # 2) Sinon : prix unitaire de la dernière opération chiffrée
+                #    (achat OU vente) la plus récente pour CE titre exact.
+                if last_cours is None:
+                    conditions = [Transaction.nom_titre == pos.nom]
+                    if pos.ticker:
+                        conditions.append(Transaction.ticker == pos.ticker)
+                    if pos.code:
+                        conditions.append(Transaction.code == pos.code)
+
+                    last_tx = session.execute(
+                        select(Transaction).where(
+                            Transaction.portefeuille_id == pos.portefeuille_id,
+                            Transaction.type_operation.in_(('achat', 'vente')),
+                            Transaction.prix_unitaire.is_not(None),
+                            or_(*conditions),
+                        ).order_by(
+                            Transaction.date_operation.desc(),
+                            Transaction.id.desc(),
+                        )
+                    ).scalars().first()
+
+                    if last_tx and last_tx.prix_unitaire:
+                        last_cours = last_tx.prix_unitaire
+
+                if last_cours is not None:
+                    pos.cours_actuel = last_cours
                     if not pos.auto_update:
                         stats['updated'] += 1
 
