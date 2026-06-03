@@ -8,7 +8,7 @@ from nicegui import ui
 from sqlalchemy import select
 
 from database.db import get_session
-from database.models import Portefeuille, Transaction, CoursHistorique
+from database.models import Portefeuille, Transaction, CoursHistorique, Position
 from utils.formatters import format_money, format_percent, get_perf_color
 from services.labels import get_display_name  # ✅ Import ajouté
 

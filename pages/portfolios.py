@@ -203,6 +203,15 @@ def _render_kpi_bandeau(portefeuilles_data, c, is_dark):
         ),
     ]
 
+    with ui.row().classes('w-full flex-wrap gap-4 mb-2'):
+        for title, value, icon, color in kpis:
+            with ui.card().classes('flex-1 min-w-[150px] p-4 gap-1').style(
+                f'background-color: {c["card_bg"]}; border: 1px solid {c["card_border"]};'
+            ):
+                with ui.row().classes('items-center gap-2 w-full justify-between'):
+                    ui.label(title).classes('text-xs font-semibold uppercase tracking-wider').style(f'color: {c["text_secondary"]}')
+                    ui.icon(icon).classes('text-lg').style(f'color: {color}')
+                ui.label(value).classes('text-xl font-bold').style(f'color: {c["text_primary"]}')
 
 # ─────────────────────────────────────────────
 # Carte portefeuille
