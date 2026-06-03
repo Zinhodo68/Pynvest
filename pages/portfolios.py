@@ -11,6 +11,7 @@ from theme import get_colors
 from database.db import get_session, get_all_membres
 from database.models import Membre, Portefeuille
 from pages.portefeuilles_data import TYPES_PORTEFEUILLE, get_type_info
+from pages.portefeuille_detail._chart import render_chart
 
 from utils.formatters import format_money, format_percent, format_date_fr, get_perf_color
 
@@ -89,7 +90,11 @@ def _render_content(c, is_dark, refresh, membre_data, member_param):
 
         stmt = (
             select(Portefeuille)
-            .options(selectinload(Portefeuille.proprietaire))
+            .options(
+                selectinload(Portefeuille.proprietaire),
+                selectinload(Portefeuille.valorisations),
+                selectinload(Portefeuille.transactions),
+            )
             .order_by(Portefeuille.id)
         )
         if membre_data:
@@ -101,6 +106,9 @@ def _render_content(c, is_dark, refresh, membre_data, member_param):
         preload_stats(session, portefeuilles)
 
 
+
+        # Historique agrégé du patrimoine (sur les portefeuilles affichés)
+        patrimoine_valorisations, patrimoine_transactions = _build_patrimoine_chart_data(portefeuilles)
 
         # to_dict() utilise le cache → 0 lazy-load
         portefeuilles_data = []
@@ -137,10 +145,113 @@ def _render_content(c, is_dark, refresh, membre_data, member_param):
     # 📊 Bandeau de KPIs globaux
     _render_kpi_bandeau(portefeuilles_data, c, is_dark)
 
+    # 📈 Bandeau dépliable d'évolution du patrimoine agrégé
+    _render_patrimoine_chart_card(
+        patrimoine_valorisations,
+        patrimoine_transactions,
+        c,
+        is_dark,
+    )
+
     # Grille des portefeuilles
     with ui.row().classes('w-full gap-4 flex-wrap'):
         for p in portefeuilles_data:
             _render_portefeuille_card(p, c, is_dark, refresh)
+
+
+# ─────────────────────────────────────────────
+# Graphique patrimoine agrégé
+# ─────────────────────────────────────────────
+
+def _build_patrimoine_chart_data(portefeuilles):
+    """Construit les séries agrégées pour le graphique patrimoine.
+
+    Pour chaque date de valorisation connue, on additionne la dernière
+    valorisation disponible de chaque portefeuille affiché. Les transactions
+    sont concaténées pour permettre au graphique de recalculer le capital
+    investi et la performance globale.
+    """
+    valos_by_portefeuille = {}
+    all_valo_dates = set()
+    transactions = []
+
+    for p in portefeuilles:
+        p_valos = []
+        for v in getattr(p, 'valorisations', []) or []:
+            if not v.date_valeur:
+                continue
+            date_iso = v.date_valeur.isoformat()
+            p_valos.append((date_iso, float(v.montant or 0)))
+            all_valo_dates.add(date_iso)
+
+        valos_by_portefeuille[p.id] = sorted(p_valos, key=lambda item: item[0])
+
+        for t in getattr(p, 'transactions', []) or []:
+            if not t.date_operation:
+                continue
+            transactions.append({
+                'id': t.id,
+                'date': t.date_operation.isoformat(),
+                'type': t.type_operation,
+                'montant': float(t.montant or 0),
+                'libelle': t.libelle,
+                'parent_transaction_id': t.parent_transaction_id,
+            })
+
+    aggregate_valorisations = []
+    last_by_portefeuille = {pid: 0.0 for pid in valos_by_portefeuille}
+    index_by_portefeuille = {pid: 0 for pid in valos_by_portefeuille}
+
+    for date_iso in sorted(all_valo_dates):
+        for pid, p_valos in valos_by_portefeuille.items():
+            idx = index_by_portefeuille[pid]
+            while idx < len(p_valos) and p_valos[idx][0] <= date_iso:
+                last_by_portefeuille[pid] = p_valos[idx][1]
+                idx += 1
+            index_by_portefeuille[pid] = idx
+
+        aggregate_valorisations.append({
+            'date': date_iso,
+            'montant': round(sum(last_by_portefeuille.values()), 2),
+        })
+
+    return aggregate_valorisations, sorted(transactions, key=lambda t: t['date'])
+
+
+def _render_patrimoine_chart_card(valorisations, transactions, c, is_dark):
+    """Bandeau dépliable d'évolution du patrimoine global."""
+    accent_color = '#3b82f6'
+
+    with ui.card().classes('w-full p-0 rounded-xl overflow-hidden').style(
+        f'background-color: {c["card_bg"]}; '
+        f'border: 1px solid {c["card_border"]};'
+    ):
+        with ui.expansion(
+            text='Évolution du patrimoine',
+            icon='show_chart',
+            value=False,
+        ).classes('w-full').style(
+            f'color: {c["text_primary"]};'
+        ) as expansion:
+            expansion.props('dense header-class="text-lg font-bold"')
+
+            if not valorisations:
+                with ui.column().classes('w-full items-center py-8 gap-2'):
+                    ui.icon('show_chart').classes('text-5xl').style(
+                        f'color: {c["text_secondary"]}'
+                    )
+                    ui.label('Aucune valorisation enregistrée').style(
+                        f'color: {c["text_secondary"]}'
+                    )
+            else:
+                with ui.column().classes('w-full px-4 pb-4'):
+                    render_chart(
+                        valorisations,
+                        transactions,
+                        accent_color,
+                        c,
+                        is_dark,
+                    )
 
 
 # ─────────────────────────────────────────────

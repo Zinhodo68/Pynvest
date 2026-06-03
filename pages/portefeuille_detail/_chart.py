@@ -1,10 +1,10 @@
-"""Graphique d'évolution avec switch € / %."""
+"""Graphique d'évolution de la valorisation."""
 from datetime import date as _date, datetime
 from nicegui import ui
 
 
 def render_chart(valorisations, transactions, color, c, is_dark):
-    """Graphique ECharts : courbe principale (Valorisation € OU Rendement %).
+    """Graphique ECharts de valorisation.
 
     Détails (capital investi, +/- value) affichés dans le tooltip au survol.
     """
@@ -87,20 +87,9 @@ def render_chart(valorisations, transactions, color, c, is_dark):
         return round(y_min, 2), round(y_max, 2)
 
     valo_y_min, valo_y_max = compute_bounds([v[1] for v in valos_data])
-    rdt_y_min, rdt_y_max = compute_bounds([v[1] for v in rendement_data])
-
-    # ─── État du switch € / % ───
-    chart_state = {'mode': 'eur'}  # 'eur' ou 'pct'
-
-    # ─── UI : Header avec switch ───
-    with ui.row().classes('w-full items-center justify-end gap-2 mb-2'):
-        toggle = ui.toggle(
-            {'eur': '💶 EUR', 'pct': '📊 %'},
-            value='eur',
-        ).props('toggle-color="primary" dense')
 
     # ─── ECharts ───
-    chart_ref = ui.echart({
+    ui.echart({
         'tooltip': {
             'trigger': 'axis',
             'backgroundColor': '#0f172a',
@@ -236,28 +225,3 @@ def render_chart(valorisations, transactions, color, c, is_dark):
         ],
     }).classes('w-full').style('height: 400px;')
 
-    # ─── Switch handler : bascule entre € et % ───
-    def on_toggle_change(e):
-        new_mode = e.value
-        chart_state['mode'] = new_mode
-
-        if new_mode == 'eur':
-            # Mode Valorisation €
-            chart_ref.options['series'][0]['name'] = 'Valorisation'
-            chart_ref.options['series'][0]['data'] = valos_data
-            chart_ref.options['yAxis'][0]['name'] = 'EUR'
-            chart_ref.options['yAxis'][0]['min'] = valo_y_min
-            chart_ref.options['yAxis'][0]['max'] = valo_y_max
-            chart_ref.options['yAxis'][0]['axisLabel']['formatter'] = '{value} €'
-        else:
-            # Mode Rendement %
-            chart_ref.options['series'][0]['name'] = 'Rendement'
-            chart_ref.options['series'][0]['data'] = rendement_data
-            chart_ref.options['yAxis'][0]['name'] = '%'
-            chart_ref.options['yAxis'][0]['min'] = rdt_y_min
-            chart_ref.options['yAxis'][0]['max'] = rdt_y_max
-            chart_ref.options['yAxis'][0]['axisLabel']['formatter'] = '{value} %'
-
-        chart_ref.update()
-
-    toggle.on('update:model-value', on_toggle_change)
