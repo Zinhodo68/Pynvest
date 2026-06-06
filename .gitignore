@@ -13,7 +13,7 @@ __pycache__/
 *.swp
 
 # Données locales (NE PAS pusher !)
-patrimoine.db
+#patrimoine.db
 patrimoine.db.backup
 patrimoine.db-wal
 patrimoine.db-shm
