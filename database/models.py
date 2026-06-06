@@ -40,6 +40,7 @@ class Portefeuille(Base):
     type = Column(String(50), nullable=False)
     etablissement = Column(String(150), nullable=True)
     date_creation = Column(Date, nullable=True)
+    date_cloture = Column(Date, nullable=True)
     logo_path = Column(String(255), nullable=True)
     url_gestion = Column(String(500), nullable=True)
     notes = Column(Text, nullable=True)
@@ -168,6 +169,8 @@ class Portefeuille(Base):
             'nom_affiche': self.nom_affiche,
             'etablissement': self.etablissement,
             'date_creation': self.date_creation.isoformat() if self.date_creation else None,
+            'date_cloture': self.date_cloture.isoformat() if self.date_cloture else None,
+            'est_cloture': self.date_cloture is not None,
             'logo_path': self.logo_path,
             'url_gestion': self.url_gestion,
             'notes': self.notes,

@@ -37,14 +37,33 @@ _kpi_expand_state = {'expanded': False, 'portefeuille_id': None}
 def _is_context_valid() -> bool:
     """
     Vérifie que le contexte NiceGUI est encore utilisable.
-    Retourne False si le client/slot a été détruit (navigation,
-    rechargement de page pendant une opération async).
+
+    ``context.client`` peut encore exister alors que le client a déjà été
+    supprimé côté NiceGUI (navigation, refresh navigateur, hot-reload pendant
+    une opération async longue). Dans ce cas, tout appel UI déclenche :
+    "Client has been deleted but is still being used".
     """
     try:
         from nicegui import context as nicegui_context
-        _ = nicegui_context.client
+
+        client = nicegui_context.client
+        client_id = getattr(client, 'id', None)
+
+        if getattr(client, 'deleted', False):
+            return False
+
+        try:
+            from nicegui.client import Client
+            instances = getattr(Client, 'instances', None)
+            if instances is not None and client_id is not None and client_id not in instances:
+                return False
+        except Exception:
+            # Selon les versions de NiceGUI, Client.instances peut ne pas être
+            # accessible publiquement. Le test ``deleted`` reste le plus utile.
+            pass
+
         return True
-    except RuntimeError:
+    except Exception:
         return False
 
 
@@ -407,17 +426,20 @@ async def _refresh_quotes(c, refresh, btn: ui.button):
             )
 
         # ── 5. Rafraîchir la page ────────────────────────────────────────────
-        refresh()
+        if _is_context_valid():
+            refresh()
 
     except Exception as e:
         logger.error(f'Erreur refresh quotes: {e}')
         _safe_notify(f'❌ Erreur : {e}', type='negative', timeout=5000)
 
     finally:
-        # ── 6. Toujours remettre le bouton en état normal ────────────────────
-        # Même si la page est détruite, NiceGUI ignorera silencieusement
-        try:
-            btn.props(remove='loading disabled')
-            btn.classes(remove='refresh-spinning')
-        except Exception:
-            pass
+        # ── 6. Remettre le bouton en état normal uniquement si le client existe
+        # encore. Sinon NiceGUI logue "Client has been deleted but is still being
+        # used" car props/classes envoient du JavaScript au navigateur disparu.
+        if _is_context_valid():
+            try:
+                btn.props(remove='loading disabled')
+                btn.classes(remove='refresh-spinning')
+            except Exception:
+                pass

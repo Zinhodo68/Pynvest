@@ -107,26 +107,24 @@ def _render_content(c, is_dark, refresh, membre_data, member_param):
 
 
 
-        # Historique agrégé du patrimoine (sur les portefeuilles affichés)
+        # Historique agrégé du patrimoine : on inclut aussi les portefeuilles
+        # clôturés afin de conserver leur évolution passée dans le graphique.
         patrimoine_valorisations, patrimoine_transactions = _build_patrimoine_chart_data(portefeuilles)
 
-        # to_dict() utilise le cache → 0 lazy-load
-        portefeuilles_data = []
-        for item in portefeuilles:
-            if isinstance(item, dict):
-                portefeuilles_data.append(item)
-            elif hasattr(item, "to_dict") and callable(item.to_dict):
-                portefeuilles_data.append(
-                    item.to_dict(include_rendement_annualise=False)
-                )
-            else:
-                # Dernier recours : on essaie de convertir en dict
-                try:
-                    portefeuilles_data.append(dict(item))
-                except Exception:
-                    portefeuilles_data.append(item)
+        portefeuilles_actifs = [p for p in portefeuilles if p.date_cloture is None]
+        portefeuilles_clotures = [p for p in portefeuilles if p.date_cloture is not None]
 
-    if not portefeuilles_data:
+        # to_dict() utilise le cache → 0 lazy-load
+        portefeuilles_data = [
+            p.to_dict(include_rendement_annualise=False)
+            for p in portefeuilles_actifs
+        ]
+        portefeuilles_clotures_data = [
+            p.to_dict(include_rendement_annualise=False)
+            for p in portefeuilles_clotures
+        ]
+
+    if not portefeuilles_data and not portefeuilles_clotures_data:
         with ui.card().classes('w-full p-12 rounded-xl items-center').style(
             f'background-color: {c["card_bg"]}; '
             f'border: 1px solid {c["card_border"]};'
@@ -142,8 +140,20 @@ def _render_content(c, is_dark, refresh, membre_data, member_param):
             )
         return
 
-    # 📊 Bandeau de KPIs globaux
-    _render_kpi_bandeau(portefeuilles_data, c, is_dark)
+    # 📊 Bandeau de KPIs globaux sur les portefeuilles actifs uniquement
+    if portefeuilles_data:
+        _render_kpi_bandeau(portefeuilles_data, c, is_dark)
+    else:
+        with ui.card().classes('w-full p-6 rounded-xl items-center').style(
+            f'background-color: {c["card_bg"]}; '
+            f'border: 1px solid {c["card_border"]};'
+        ):
+            ui.icon('inventory_2').classes('text-4xl').style(
+                f'color: {c["text_secondary"]}'
+            )
+            ui.label('Aucun portefeuille actif').classes('font-semibold').style(
+                f'color: {c["text_primary"]}'
+            )
 
     # 📈 Bandeau dépliable d'évolution du patrimoine agrégé
     _render_patrimoine_chart_card(
@@ -153,10 +163,20 @@ def _render_content(c, is_dark, refresh, membre_data, member_param):
         is_dark,
     )
 
-    # Grille des portefeuilles
-    with ui.row().classes('w-full gap-4 flex-wrap'):
-        for p in portefeuilles_data:
-            _render_portefeuille_card(p, c, is_dark, refresh)
+    # Grille des portefeuilles actifs
+    if portefeuilles_data:
+        with ui.row().classes('w-full gap-4 flex-wrap'):
+            for p in portefeuilles_data:
+                _render_portefeuille_card(p, c, is_dark, refresh)
+
+    # Accès discret aux anciens portefeuilles clôturés
+    if portefeuilles_clotures_data:
+        _render_portefeuilles_clotures(
+            portefeuilles_clotures_data,
+            c,
+            is_dark,
+            refresh,
+        )
 
 
 # ─────────────────────────────────────────────
@@ -172,30 +192,64 @@ def _build_patrimoine_chart_data(portefeuilles):
     investi et la performance globale.
     """
     valos_by_portefeuille = {}
+    cloture_by_portefeuille = {}
     all_valo_dates = set()
     transactions = []
 
     for p in portefeuilles:
+        cloture_iso = p.date_cloture.isoformat() if p.date_cloture else None
+        cloture_by_portefeuille[p.id] = cloture_iso
+        if cloture_iso:
+            # Point de sortie : à la date de clôture, le portefeuille ne
+            # contribue plus au patrimoine courant, mais son passé reste visible.
+            all_valo_dates.add(cloture_iso)
+
         p_valos = []
         for v in getattr(p, 'valorisations', []) or []:
             if not v.date_valeur:
                 continue
             date_iso = v.date_valeur.isoformat()
+            if cloture_iso and date_iso >= cloture_iso:
+                continue
             p_valos.append((date_iso, float(v.montant or 0)))
             all_valo_dates.add(date_iso)
 
         valos_by_portefeuille[p.id] = sorted(p_valos, key=lambda item: item[0])
 
+        net_apports = 0.0
         for t in getattr(p, 'transactions', []) or []:
             if not t.date_operation:
                 continue
+            date_iso = t.date_operation.isoformat()
+            if cloture_iso and date_iso > cloture_iso:
+                continue
+
+            montant = float(t.montant or 0)
+            if t.parent_transaction_id is None:
+                if t.type_operation == 'versement':
+                    net_apports += montant
+                elif t.type_operation == 'retrait':
+                    net_apports -= montant
+
             transactions.append({
                 'id': t.id,
-                'date': t.date_operation.isoformat(),
+                'date': date_iso,
                 'type': t.type_operation,
-                'montant': float(t.montant or 0),
+                'montant': montant,
                 'libelle': t.libelle,
                 'parent_transaction_id': t.parent_transaction_id,
+            })
+
+        if cloture_iso and net_apports > 0:
+            # Sortie synthétique du capital investi à la clôture : le graphique
+            # global ne garde le portefeuille que sur son historique passé.
+            transactions.append({
+                'id': f'cloture-{p.id}',
+                'date': cloture_iso,
+                'type': 'retrait',
+                'montant': round(net_apports, 2),
+                'libelle': 'Clôture du portefeuille',
+                'parent_transaction_id': None,
             })
 
     aggregate_valorisations = []
@@ -210,9 +264,16 @@ def _build_patrimoine_chart_data(portefeuilles):
                 idx += 1
             index_by_portefeuille[pid] = idx
 
+        total = 0.0
+        for pid, last_value in last_by_portefeuille.items():
+            cloture_iso = cloture_by_portefeuille.get(pid)
+            if cloture_iso and date_iso >= cloture_iso:
+                continue
+            total += last_value
+
         aggregate_valorisations.append({
             'date': date_iso,
-            'montant': round(sum(last_by_portefeuille.values()), 2),
+            'montant': round(total, 2),
         })
 
     return aggregate_valorisations, sorted(transactions, key=lambda t: t['date'])
@@ -325,6 +386,64 @@ def _render_kpi_bandeau(portefeuilles_data, c, is_dark):
                 ui.label(value).classes('text-xl font-bold').style(f'color: {c["text_primary"]}')
 
 # ─────────────────────────────────────────────
+# Anciens portefeuilles clôturés
+# ─────────────────────────────────────────────
+
+def _render_portefeuilles_clotures(portefeuilles_clotures_data, c, is_dark, refresh):
+    """Liste discrète mais accessible des portefeuilles clôturés."""
+    with ui.card().classes('w-full p-0 rounded-xl overflow-hidden mt-2').style(
+        f'background-color: {c["card_bg"]}; '
+        f'border: 1px solid {c["card_border"]};'
+    ):
+        with ui.expansion(
+            text=f'Anciens portefeuilles clôturés ({len(portefeuilles_clotures_data)})',
+            icon='inventory_2',
+            value=False,
+        ).classes('w-full').style(f'color: {c["text_primary"]};') as expansion:
+            expansion.props('dense header-class="text-sm font-semibold"')
+
+            with ui.column().classes('w-full px-4 pb-4 gap-2'):
+                for p in portefeuilles_clotures_data:
+                    type_info = get_type_info(p['type'])
+                    accent_color = type_info['couleur']
+                    with ui.row().classes(
+                        'w-full items-center justify-between gap-3 px-3 py-2 rounded-lg'
+                    ).style(
+                        f'background-color: {c["card_border"]}30; '
+                        f'border: 1px solid {c["card_border"]};'
+                    ):
+                        with ui.row().classes('items-center gap-3').style('min-width: 0;'):
+                            ui.icon(type_info['icon']).classes('text-lg').style(
+                                f'color: {accent_color}'
+                            )
+                            with ui.column().classes('gap-0').style('min-width: 0;'):
+                                ui.label(p['nom_affiche']).classes('font-medium').style(
+                                    f'color: {c["text_primary"]}; '
+                                    'overflow: hidden; text-overflow: ellipsis; white-space: nowrap;'
+                                )
+                                ui.label(
+                                    f'Clôturé le {format_date_fr(p["date_cloture"])}'
+                                ).classes('text-xs').style(
+                                    f'color: {c["text_secondary"]}'
+                                )
+
+                        with ui.row().classes('items-center gap-1'):
+                            ui.button(
+                                'Voir',
+                                on_click=lambda pid=p['id']: ui.navigate.to(f'/portefeuille/{pid}'),
+                            ).props('flat dense').style(
+                                f'color: {c["text_secondary"]}; font-size: 0.75rem;'
+                            )
+                            ui.button(
+                                'Réouvrir',
+                                on_click=lambda pid=p['id'], name=p['nom_affiche']:
+                                _reopen_portefeuille(pid, name, refresh),
+                            ).props('flat dense').style(
+                                'color: #10b981; font-size: 0.75rem;'
+                            )
+
+
+# ─────────────────────────────────────────────
 # Carte portefeuille
 # ─────────────────────────────────────────────
 
@@ -380,9 +499,9 @@ def _render_portefeuille_card(p, c, is_dark, refresh):
                             _open_dialog(c, refresh, portefeuille_id=pid)
                         )
                         ui.menu_item(
-                            'Supprimer',
+                            'Clôturer',
                             on_click=lambda pid=p['id'], name=p['nom_affiche']:
-                            _confirm_delete(pid, name, refresh)
+                            _open_cloture_dialog(pid, name, c, refresh)
                         )
 
         # ─── Corps : logo + établissement + propriétaire ───
@@ -843,35 +962,77 @@ def _open_dialog(c, refresh, portefeuille_id: int = None, default_membre_id: int
 
 
 # ─────────────────────────────────────────────
-# Confirmation suppression
+# Clôture / réouverture
 # ─────────────────────────────────────────────
 
-def _confirm_delete(portefeuille_id: int, name: str, refresh):
-    with ui.dialog() as dialog, ui.card().classes('p-6 gap-4'):
-        ui.label('Confirmer la suppression').classes('text-xl font-bold')
-        ui.label(f'Voulez-vous vraiment supprimer "{name}" ?')
-        ui.label('Cette action est irréversible.').classes('text-sm').style(
-            'color: #ef4444'
-        )
+def _open_cloture_dialog(portefeuille_id: int, name: str, c, refresh):
+    """Demande une date puis clôture le portefeuille sans supprimer l'historique."""
+    today_fr = date.today().strftime('%d/%m/%Y')
 
-        def do_delete():
+    with ui.dialog() as dialog, ui.card().classes('p-6 gap-4').style(
+        f'background-color: {c["card_bg"]}; '
+        f'border: 1px solid {c["card_border"]}; '
+        'min-width: 420px;'
+    ):
+        ui.label('Clôturer le portefeuille').classes('text-xl font-bold').style(
+            f'color: {c["text_primary"]}'
+        )
+        ui.label(f'Portefeuille : {name}').style(f'color: {c["text_secondary"]}')
+        ui.label(
+            'La carte disparaîtra de la liste des portefeuilles actifs, mais son historique '
+            'restera pris en compte dans le graphique “Évolution du patrimoine”.'
+        ).classes('text-sm').style(f'color: {c["text_secondary"]}')
+
+        with ui.input('Date de clôture', value=today_fr) \
+                .classes('w-full') \
+                .props('mask="##/##/####" placeholder="JJ/MM/AAAA"') as date_input:
+            with ui.menu().props('no-parent-event') as menu:
+                with ui.date().bind_value(date_input).props('mask="DD/MM/YYYY"'):
+                    with ui.row().classes('justify-end'):
+                        ui.button('Fermer', on_click=menu.close).props('flat')
+            with date_input.add_slot('append'):
+                ui.icon('edit_calendar').on('click', menu.open).classes('cursor-pointer')
+
+        def do_cloture():
+            try:
+                date_val = datetime.strptime(date_input.value, '%d/%m/%Y').date()
+            except (TypeError, ValueError):
+                ui.notify('Format de date invalide (JJ/MM/AAAA)', type='negative')
+                return
+
             with get_session() as session:
                 p = session.get(Portefeuille, portefeuille_id)
-                if p:
-                    if p.logo_path:
-                        logo_file = UPLOADS_DIR / p.logo_path
-                        if logo_file.exists():
-                            logo_file.unlink()
-                    session.delete(p)
-                    session.commit()
-            ui.notify(f'"{name}" a été supprimé', type='warning')
+                if not p:
+                    ui.notify('Portefeuille introuvable', type='negative')
+                    return
+                p.date_cloture = date_val
+                session.commit()
+
+            ui.notify(f'"{name}" a été clôturé', type='positive')
             dialog.close()
             refresh()
             refresh_layout()
 
-        with ui.row().classes('w-full justify-end gap-2'):
-            ui.button('Annuler', on_click=dialog.close).props('flat')
-            ui.button('Supprimer', on_click=do_delete).props('unelevated') \
-                .classes('bg-red-600 text-white')
+        with ui.row().classes('w-full justify-end gap-2 mt-2'):
+            ui.button('Annuler', on_click=dialog.close).props('flat').style(
+                f'color: {c["text_secondary"]}'
+            )
+            ui.button('Clôturer', on_click=do_cloture).props('unelevated') \
+                .classes('bg-orange-600 text-white')
 
         dialog.open()
+
+
+def _reopen_portefeuille(portefeuille_id: int, name: str, refresh):
+    """Réactive un portefeuille clôturé."""
+    with get_session() as session:
+        p = session.get(Portefeuille, portefeuille_id)
+        if not p:
+            ui.notify('Portefeuille introuvable', type='negative')
+            return
+        p.date_cloture = None
+        session.commit()
+
+    ui.notify(f'"{name}" a été réouvert', type='positive')
+    refresh()
+    refresh_layout()

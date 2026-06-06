@@ -42,6 +42,25 @@ def init_db():
     """Crée toutes les tables qui n'existent pas encore."""
     from database import models
     Base.metadata.create_all(bind=engine)
+    _ensure_light_migrations()
+
+
+def _ensure_light_migrations():
+    """Petites migrations automatiques pour les colonnes ajoutées.
+
+    ``create_all`` ne modifie pas les tables déjà existantes. Cette fonction
+    garde la base locale compatible après une mise à jour du modèle.
+    """
+    if engine.dialect.name != 'sqlite':
+        return
+
+    with engine.begin() as conn:
+        existing = {
+            row[1]
+            for row in conn.exec_driver_sql('PRAGMA table_info(portefeuilles)').fetchall()
+        }
+        if 'date_cloture' not in existing:
+            conn.exec_driver_sql('ALTER TABLE portefeuilles ADD COLUMN date_cloture DATE')
 
 
 # ══════════════════════════════════════════════════════════════════════════
