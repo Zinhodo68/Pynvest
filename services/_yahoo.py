@@ -97,7 +97,7 @@ def get_yahoo_history(symbol: str, start_date, end_date=None) -> list[dict]:
         hist = ticker.history(
             start=start_date.isoformat(),
             end=(end_date).isoformat(),
-            auto_adjust=True,
+            auto_adjust=False,
         )
 
         if hist.empty:
@@ -151,7 +151,7 @@ def get_yahoo_price_at_date(symbol: str, target_date) -> dict:
         hist = ticker.history(
             start=start.isoformat(),
             end=end.isoformat(),
-            auto_adjust=True,
+            auto_adjust=False,
         )
 
         if hist.empty:

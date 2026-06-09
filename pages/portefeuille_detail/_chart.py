@@ -26,17 +26,21 @@ def render_chart(valorisations, transactions, color, c, is_dark):
     valo_by_date = {str(v['date']): v['montant'] for v in valorisations}
 
     # Apports cumulés — UNIQUEMENT les flux externes
+    from collections import defaultdict
+    tx_by_date = defaultdict(list)
+    for t in transactions:
+        tx_by_date[str(t['date'])].append(t)
+
     apports_par_date = {}
     cumul = 0
     for d in sorted_dates:
-        for t in transactions:
-            if str(t['date']) == d:
-                if t.get('parent_transaction_id') is not None:
-                    continue
-                if t['type'] == 'versement':
-                    cumul += t['montant']
-                elif t['type'] == 'retrait':
-                    cumul -= t['montant']
+        for t in tx_by_date.get(d, []):
+            if t.get('parent_transaction_id') is not None:
+                continue
+            if t['type'] == 'versement':
+                cumul += t['montant']
+            elif t['type'] == 'retrait':
+                cumul -= t['montant']
         apports_par_date[d] = cumul
 
     # Construction des séries de données

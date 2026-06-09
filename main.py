@@ -1,5 +1,83 @@
 import os
+import sys
 from pathlib import Path
+
+# ⚡ Évite le bug de l'extension Cython de SQLAlchemy sur Python 3.14/Windows :
+# 'TypeError: fromisoformat: argument must be str' lors de la lecture des valeurs NULL.
+# On bloque le chargement de l'extension compilée pour forcer le fallback pur Python de SQLAlchemy.
+sys.modules['sqlalchemy.cyextension'] = None
+sys.modules['sqlalchemy.cyextension.processors'] = None
+sys.modules['sqlalchemy.cyextension.resultproxy'] = None
+sys.modules['sqlalchemy.cyextension.util'] = None
+sys.modules['sqlalchemy.cyextension.collections'] = None
+
+# 🛡️ Sécurisation des processeurs pur Python de SQLAlchemy pour tolérer tous les types de dates/datetimes
+# (y compris des types inattendus comme des entiers, des chaînes mal formatées, ou des vides)
+import datetime
+from datetime import date as date_cls
+from datetime import datetime as datetime_cls
+from datetime import time as time_cls
+import sqlalchemy.engine._py_processors as py_processors
+
+def secure_str_to_datetime(value):
+    if value is not None:
+        if not isinstance(value, str):
+            try:
+                if isinstance(value, (int, float)) and value > 1000000000:
+                    ts = value / 1000.0 if value > 100000000000 else value
+                    return datetime_cls.fromtimestamp(ts)
+                value = str(value)
+            except Exception:
+                return None
+        try:
+            return datetime_cls.fromisoformat(value)
+        except Exception:
+            for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                try:
+                    return datetime_cls.strptime(value, fmt)
+                except Exception:
+                    pass
+            return None
+    return None
+
+def secure_str_to_date(value):
+    if value is not None:
+        if not isinstance(value, str):
+            try:
+                if isinstance(value, (int, float)) and value > 1000000000:
+                    ts = value / 1000.0 if value > 100000000000 else value
+                    return datetime_cls.fromtimestamp(ts).date()
+                value = str(value)
+            except Exception:
+                return None
+        try:
+            return date_cls.fromisoformat(value)
+        except Exception:
+            try:
+                cleaned = value.split(' ')[0]
+                return date_cls.fromisoformat(cleaned)
+            except Exception:
+                try:
+                    return datetime_cls.strptime(value, "%Y-%m-%d").date()
+                except Exception:
+                    pass
+                return None
+    return None
+
+def secure_str_to_time(value):
+    if value is not None:
+        if not isinstance(value, str):
+            value = str(value)
+        try:
+            return time_cls.fromisoformat(value)
+        except Exception:
+            return None
+    return None
+
+py_processors.str_to_datetime = secure_str_to_datetime
+py_processors.str_to_date = secure_str_to_date
+py_processors.str_to_time = secure_str_to_time
+
 from nicegui import ui, app
 
 # Initialisation de la BDD

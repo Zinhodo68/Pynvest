@@ -901,31 +901,28 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                 ui.icon('edit_calendar').on('click', menu.open).classes('cursor-pointer')
 
         montant_input = ui.number('Montant (€)', value=data['montant'],
-                                  format='%.2f', min=0).classes('w-full')
+                                  format='%.2f', min=0).classes('w-full').props('onfocus="this.select()"')
         dividend_per_share_input = ui.number('Dividende par part (€)', value=0.0,
-                                             format='%.4f', min=0).classes('w-full')
+                                             format='%.4f', min=0).classes('w-full').props('onfocus="this.select()"')
         dividend_parts_input = ui.number('Nombre de parts réinvesties *', value=0.0,
-                                         format='%.4f', min=0, step=0.01).classes('w-full')
+                                         format='%.4f', min=0, step=0.01).classes('w-full').props(
+            'onfocus="this.select()"')
         current_fees_parts_qty_label = ui.label(
             "Quantité actuelle : 0.0 parts"
         ).classes('text-sm text-gray-500')
-        fees_parts_to_deduct_input = ui.number(
-            'Quantité de parts à prélever *', value=0.0,
-            format='%.4f', min=0, step=0.01
-        ).classes('w-full')
-        fees_final_parts_qty_input = ui.number(
-            'Quantité finale de parts *', value=0.0,
-            format='%.4f', min=0, step=0.01
-        ).classes('w-full')
-        # 🆕 Pour un actif historique (vendu), pas de cours actuel disponible
-        # → l'utilisateur saisit directement le montant des frais en €.
-        fees_hist_amount_input = ui.number(
-            'Montant des frais (€) *', value=0.0,
-            format='%.2f', min=0
-        ).classes('w-full')
-        libelle_input = ui.input('Libellé (optionnel)', value=data['libelle']).classes('w-full')
+        fees_parts_to_deduct_input = ui.number('Quantité de parts à prélever *', value=0.0,
+                                               format='%.4f', min=0, step=0.01).classes('w-full').props(
+            'onfocus="this.select()"')
+
+        fees_final_parts_qty_input = ui.number('Quantité finale de parts *', value=0.0,
+                                               format='%.4f', min=0, step=0.01).classes('w-full').props(
+            'onfocus="this.select()"')
+
+        fees_hist_amount_input = ui.number('Montant des frais (€) *', value=0.0,
+                                           format='%.2f', min=0).classes('w-full').props('onfocus="this.select()"')
+        libelle_input = ui.input('Libellé (optionnel)', value=data['libelle']).classes('w-full').props('onfocus="this.select()"')
         frais_input = ui.number('⚠️ Frais associés (€)', value=frais_existants,
-                                format='%.2f', min=0).classes('w-full')
+                                format='%.2f', min=0).classes('w-full').props('onfocus="this.select()"')
         info_label = ui.label().classes(
             'text-xs px-3 py-2 rounded-lg whitespace-pre-line'
         ).style(f'background-color: {c["card_border"]}; color: {c["text_secondary"]};')
