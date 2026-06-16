@@ -2,7 +2,7 @@
 import asyncio
 from datetime import date, datetime
 from nicegui import ui
-from sqlalchemy import select
+from sqlalchemy import select, or_
 
 from database.db import get_session
 from database.models import Position, Transaction, Portefeuille
@@ -14,6 +14,18 @@ from services.market_data import (
 from services.search import unified_search, is_isin
 from pages.portefeuille_detail._cash_helpers import impact_cash, ajuster_cash
 
+def _normalise_market_identifiers(t: dict) -> tuple[str | None, str | None]:
+    """Retourne (ticker_yahoo, code_isin) sans confondre ISIN et ticker."""
+    source = t.get('source')
+    symbol = (t.get('symbol') or '').strip() or None
+    isin = (t.get('isin') or t.get('code') or '').strip() or None
+
+    if symbol and is_isin(symbol):
+        isin = isin or symbol
+        symbol = None
+
+    ticker = symbol if source == 'yahoo' else None
+    return ticker, isin
 
 def open_buy_dialog(portefeuille_id, c, refresh,
                     preselect_ticker=None, preselect_code=None, preselect_nom=None,
@@ -316,19 +328,25 @@ def open_buy_dialog(portefeuille_id, c, refresh,
             results_container.clear()
             search_input.value = ticker_data.get('name', '')
 
-            # Source : on essaie de deviner depuis ticker/isin
-            if ticker_data.get('ticker'):
+            # Source : un vrai ticker Yahoo n'est PAS un ISIN.
+            db_ticker = (ticker_data.get('ticker') or '').strip() or None
+            db_isin = (ticker_data.get('isin') or ticker_data.get('code') or '').strip() or None
+
+            if db_ticker and not is_isin(db_ticker):
                 source = 'yahoo'
-                symbol_or_url = ticker_data['ticker']
-            elif ticker_data.get('isin'):
+                symbol_or_url = db_ticker
+                ticker_data['symbol'] = db_ticker
+            elif db_isin or (db_ticker and is_isin(db_ticker)):
                 source = 'boursorama'
-                symbol_or_url = ticker_data['isin']
+                symbol_or_url = db_isin or db_ticker
+                ticker_data['symbol'] = symbol_or_url
+                ticker_data['isin'] = symbol_or_url
             else:
                 source = 'manual'
                 symbol_or_url = None
+                ticker_data['symbol'] = ticker_data.get('name', '')[:20]
 
             ticker_data['source'] = source
-            ticker_data['symbol'] = ticker_data.get('ticker') or ticker_data.get('isin') or ticker_data.get('name', '')[:20]
 
             if source == 'manual':
                 # Pas de cours auto → directement le formulaire
@@ -755,6 +773,7 @@ def open_buy_dialog(portefeuille_id, c, refresh,
                                 )
                                 return
 
+                            ticker_value, code_value = _normalise_market_identifiers(t)
                             stmt = select(Position).where(
                                 Position.portefeuille_id == portefeuille_id,
                             )
@@ -788,8 +807,8 @@ def open_buy_dialog(portefeuille_id, c, refresh,
                                 new_pos = Position(
                                     portefeuille_id=portefeuille_id,
                                     nom=t['name'],
-                                    code=t.get('isin'),
-                                    ticker=t.get('symbol') if t.get('source') != 'manual' else None,
+                                    code=code_value,
+                                    ticker=ticker_value,
                                     categorie=t.get('type', 'Autre'),
                                     quantite=q,
                                     prix_moyen=prix_eur,
@@ -806,8 +825,8 @@ def open_buy_dialog(portefeuille_id, c, refresh,
                                 type_operation='achat',
                                 montant=montant_titres_eur,
                                 libelle=f'Achat {q:g} × {t["name"][:30]}',
-                                ticker=t.get('symbol') if t.get('source') != 'manual' else None,
-                                code=t.get('isin'),
+                                ticker=ticker_value,
+                                code=code_value,
                                 nom_titre=t['name'],
                                 categorie=t.get('type', 'Autre'),
                                 quantite=q,

@@ -503,6 +503,13 @@ def _render_portefeuille_card(p, c, is_dark, refresh):
                             on_click=lambda pid=p['id'], name=p['nom_affiche']:
                             _open_cloture_dialog(pid, name, c, refresh)
                         )
+                        ui.separator()
+                        suppr_item = ui.menu_item(
+                            'Supprimer',
+                            on_click=lambda pid=p['id'], name=p['nom_affiche']:
+                            _open_delete_dialog(pid, name, c, refresh)
+                        )
+                        suppr_item.style('color: #ef4444; font-weight: 600;')
 
         # ─── Corps : logo + établissement + propriétaire ───
         with ui.column().classes('w-full p-5 gap-4'):
@@ -1036,3 +1043,114 @@ def _reopen_portefeuille(portefeuille_id: int, name: str, refresh):
     ui.notify(f'"{name}" a été réouvert', type='positive')
     refresh()
     refresh_layout()
+
+
+# ─────────────────────────────────────────────
+# Suppression définitive
+# ─────────────────────────────────────────────
+
+def _open_delete_dialog(portefeuille_id: int, name: str, c, refresh):
+    """Demande une confirmation puis supprime DÉFINITIVEMENT le portefeuille
+    et toutes ses données (transactions, positions, valorisations).
+
+    Contrairement à la clôture qui archive le portefeuille en conservant son
+    historique, la suppression efface intégralement ce dernier.
+    """
+    from database.models import Transaction, Position
+
+    # Comptage des données qui vont disparaître (pour information de l'utilisateur)
+    with get_session() as session:
+        nb_transactions = session.execute(
+            select(func.count()).select_from(Transaction).where(
+                Transaction.portefeuille_id == portefeuille_id
+            )
+        ).scalar() or 0
+        nb_positions = session.execute(
+            select(func.count()).select_from(Position).where(
+                Position.portefeuille_id == portefeuille_id
+            )
+        ).scalar() or 0
+        logo_path = None
+        p = session.get(Portefeuille, portefeuille_id)
+        if p:
+            logo_path = p.logo_path
+
+    with ui.dialog() as dialog, ui.card().classes('p-6 gap-4').style(
+        f'background-color: {c["card_bg"]}; '
+        f'border: 1px solid {c["card_border"]}; '
+        'min-width: 460px; max-width: 520px;'
+    ):
+        with ui.row().classes('items-center gap-3'):
+            ui.icon('warning').classes('text-3xl').style('color: #ef4444;')
+            ui.label('Supprimer le portefeuille') \
+                .classes('text-xl font-bold').style(f'color: {c["text_primary"]}')
+
+        ui.label(f'Portefeuille : {name}').style(f'color: {c["text_secondary"]}')
+
+        # Bloc d'avertissement
+        with ui.element('div').classes('w-full p-3 rounded-lg').style(
+            'background-color: #ef444415; border: 1px solid #ef444440;'
+        ):
+            ui.label('Cette action est définitive et irréversible.') \
+                .classes('font-semibold').style('color: #ef4444;')
+            ui.label('Le portefeuille et toutes ses données seront supprimés :') \
+                .classes('text-sm mt-1').style(f'color: {c["text_primary"]}')
+            with ui.column().classes('gap-0 mt-1 ml-2'):
+                ui.label(f'• {nb_transactions} transaction(s)') \
+                    .classes('text-sm').style(f'color: {c["text_secondary"]}')
+                ui.label(f'• {nb_positions} position(s)') \
+                    .classes('text-sm').style(f'color: {c["text_secondary"]}')
+                ui.label('• Historique des valorisations') \
+                    .classes('text-sm').style(f'color: {c["text_secondary"]}')
+
+        ui.label(
+            'Conseil : si vous souhaitez simplement archiver ce portefeuille '
+            'tout en conservant son historique, utilisez plutôt « Clôturer ».'
+        ).classes('text-xs italic').style(f'color: {c["text_secondary"]}')
+
+        # Case à cocher de confirmation obligatoire
+        confirm_check = ui.checkbox(
+            'Je comprends que cette suppression est irréversible'
+        ).classes('w-full')
+
+        def do_delete():
+            if not confirm_check.value:
+                ui.notify(
+                    'Cochez la case pour confirmer la suppression.',
+                    type='warning',
+                )
+                return
+
+            with get_session() as session:
+                p = session.get(Portefeuille, portefeuille_id)
+                if not p:
+                    ui.notify('Portefeuille introuvable', type='negative')
+                    return
+                # Le modèle déclare cascade='all, delete-orphan' sur les
+                # relations transactions / positions / valorisations :
+                # supprimer le portefeuille emporte tout son historique.
+                session.delete(p)
+                session.commit()
+
+            # Nettoyage du logo (fichier unique à ce portefeuille)
+            if logo_path:
+                logo_file = UPLOADS_DIR / logo_path
+                if logo_file.exists():
+                    try:
+                        logo_file.unlink()
+                    except OSError:
+                        pass
+
+            ui.notify(f'"{name}" a été supprimé', type='positive')
+            dialog.close()
+            refresh()
+            refresh_layout()
+
+        with ui.row().classes('w-full justify-end gap-2 mt-2'):
+            ui.button('Annuler', on_click=dialog.close).props('flat').style(
+                f'color: {c["text_secondary"]}'
+            )
+            ui.button('Supprimer définitivement', on_click=do_delete) \
+                .props('unelevated').classes('bg-red-600 text-white')
+
+        dialog.open()

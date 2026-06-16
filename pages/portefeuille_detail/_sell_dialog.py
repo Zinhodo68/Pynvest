@@ -4,6 +4,8 @@ from datetime import date, datetime
 from nicegui import ui
 from sqlalchemy import select
 
+from services.search import is_isin
+
 from database.db import get_session
 from database.models import Position, Transaction, Portefeuille
 from utils.formatters import format_money, format_percent, get_perf_color
@@ -162,12 +164,15 @@ def open_sell_dialog(portefeuille_id, c, refresh,
                                 .classes('text-base font-bold').style(
                                 f'color: {c["text_primary"]}')
 
-                if pos.get('ticker'):
+                pos_ticker = (pos.get('ticker') or '').strip() or None
+                pos_code = (pos.get('code') or '').strip() or None
+
+                if pos_ticker and not is_isin(pos_ticker):
                     source = 'yahoo'
-                    symbol_or_url = pos['ticker']
-                elif pos.get('code'):
+                    symbol_or_url = pos_ticker
+                elif pos_code or (pos_ticker and is_isin(pos_ticker)):
                     source = 'boursorama'
-                    symbol_or_url = pos['code']
+                    symbol_or_url = pos_code or pos_ticker
                 else:
                     source = 'manual'
                     symbol_or_url = None

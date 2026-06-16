@@ -19,31 +19,46 @@ from services.labels import get_display_name
 
 async def _run_backfill_async(
     portefeuille_id: int,
+    client,
     need_cours: bool = False,
     refresh_chart=None,
 ):
     """Backfill non-bloquant après toute transaction."""
     from services.backfill import backfill_cours_historique, backfill_valorisations
 
-    notif = ui.notification(
-        "📈 Recalcul de l'historique en cours...",
-        type='ongoing',
-        spinner=True,
-        timeout=None,
-    )
+    notif = None
     try:
+        # La coroutine est lancée avec asyncio.create_task() :
+        # il faut ré-entrer explicitement dans le client NiceGUI.
+        with client:
+            notif = ui.notification(
+                "📈 Recalcul de l'historique en cours...",
+                type='ongoing',
+                spinner=True,
+                timeout=None,
+            )
+
         if need_cours:
             await asyncio.to_thread(backfill_cours_historique, portefeuille_id)
-        await asyncio.to_thread(backfill_valorisations, portefeuille_id)
-        notif.dismiss()
-        ui.notify('📈 Historique mis à jour', type='positive', timeout=3000)
 
-        if refresh_chart:
-            refresh_chart()
+        await asyncio.to_thread(backfill_valorisations, portefeuille_id)
+
+        with client:
+            if notif:
+                notif.dismiss()
+
+            ui.notify('📈 Historique mis à jour', type='positive', timeout=3000)
+
+            if refresh_chart:
+                refresh_chart()
 
     except Exception as e:
-        notif.dismiss()
-        ui.notify(f'⚠️ Recalcul échoué : {e}', type='warning', timeout=5000)
+        with client:
+            if notif:
+                notif.dismiss()
+
+            ui.notify(f'⚠️ Recalcul échoué : {e}', type='warning', timeout=5000)
+
         print(f'⚠️ Backfill async échoué pour portefeuille #{portefeuille_id}: {e}')
 
 
@@ -239,8 +254,39 @@ def render_transactions_card(transactions, c, is_dark, refresh, portefeuille_id,
     }
     filter_state = {'expanded': False}
 
-    # Actifs uniques pour le select
-    unique_assets = _extract_unique_assets(main_transactions)
+    # 🆕 Fetch all possible assets for the filter (active positions + historical)
+    all_asset_filter_options = {}
+    with get_session() as session:
+        # Active positions
+        active_positions_db = session.execute(
+            select(Position).where(
+                Position.portefeuille_id == portefeuille_id,
+                Position.categorie.not_in(['Fonds Euro', 'Cash'])
+            )
+        ).scalars().all()
+        for pos in active_positions_db:
+            display = get_display_name(
+                ticker=pos.ticker,
+                code=pos.code,
+                fallback=pos.nom,
+            )
+            all_asset_filter_options[pos.nom] = display
+
+        # Historical assets (from _get_historical_assets)
+        active_position_names = {pos.nom for pos in active_positions_db}
+        historical_assets = _get_historical_assets(
+            session, portefeuille_id, active_position_names
+        )
+        for hist in historical_assets:
+            display = get_display_name(
+                ticker=hist['ticker'],
+                code=hist['code'],
+                fallback=hist['nom'],
+            )
+            all_asset_filter_options[hist['nom']] = display
+
+    # Sort all assets
+    all_asset_filter_options = dict(sorted(all_asset_filter_options.items(), key=lambda x: x[1].lower()))
 
     with ui.card().classes('p-5 rounded-xl w-full').style(
         f'background-color: {c["card_bg"]}; '
@@ -334,7 +380,7 @@ def render_transactions_card(transactions, c, is_dark, refresh, portefeuille_id,
             with ui.row().classes('w-full items-end gap-2 flex-wrap'):
                 # Select actif
                 asset_options = {'': '— Tous les actifs —'}
-                asset_options.update(unique_assets)
+                asset_options.update(all_asset_filter_options) # Use the new comprehensive list
                 asset_select = ui.select(
                     asset_options,
                     value='',
@@ -645,6 +691,7 @@ def render_transactions_card(transactions, c, is_dark, refresh, portefeuille_id,
 def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = None,
                             refresh_chart=None):
     """Création ou édition d'une transaction."""
+    client = ui.context.client
     is_edit = transaction_id is not None
 
     data = {
@@ -1690,6 +1737,7 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                 asyncio.create_task(
                     _run_backfill_async(
                         portefeuille_id,
+                        client=client,
                         need_cours=has_ticker,
                         refresh_chart=refresh_chart,
                     )
@@ -1702,6 +1750,8 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
 
 
 def _confirm_delete_transaction(transaction_id, libelle, refresh, refresh_chart=None):
+    client = ui.context.client
+
     with get_session() as session:
         t = session.get(Transaction, transaction_id)
         if not t:
@@ -1943,6 +1993,7 @@ def _confirm_delete_transaction(transaction_id, libelle, refresh, refresh_chart=
                 asyncio.create_task(
                     _run_backfill_async(
                         ptf_id_for_backfill,
+                        client=client,
                         need_cours=has_ticker,
                         refresh_chart=refresh_chart,
                     )

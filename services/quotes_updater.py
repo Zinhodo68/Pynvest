@@ -2,6 +2,8 @@
 from datetime import date, timedelta
 from sqlalchemy import select, or_
 
+from services.search import is_isin
+
 from database.db import get_session
 from database.models import Position, CoursHistorique, Valorisation, Portefeuille, Transaction
 from services.market_data import get_current_price_with_currency, get_currency_rate
@@ -41,13 +43,34 @@ def update_all_quotes(force: bool = False) -> dict:
 
         for pos in positions:
             if pos.auto_update:
-                key = pos.ticker or pos.code
+                ticker = (pos.ticker or '').strip() or None
+                code = (pos.code or '').strip() or None
+
+                if ticker and not is_isin(ticker):
+                    key = ticker
+                    source = 'yahoo'
+                    ticker_for_hist = ticker
+                    isin_for_hist = code
+
+                elif code or (ticker and is_isin(ticker)):
+                    # Fonds/OPCVM Boursorama : l'identifiant est l'ISIN.
+                    # Surtout ne pas l'envoyer à Yahoo comme ticker.
+                    key = code or ticker
+                    source = 'boursorama'
+                    ticker_for_hist = None
+                    isin_for_hist = key
+
+                else:
+                    key = None
+
                 if key and key not in unique_tickers_auto:
                     unique_tickers_auto[key] = {
-                        'ticker': pos.ticker,
-                        'isin': pos.code,
+                        'ticker': ticker_for_hist,
+                        'isin': isin_for_hist,
+                        'source': source,
                         'devise_position': pos.devise or 'EUR',
                     }
+
             else:
                 positions_manuelles.append(pos)
 
@@ -58,9 +81,9 @@ def update_all_quotes(force: bool = False) -> dict:
         new_quotes = {}  # {key: cours_eur}
         for key, info in unique_tickers_auto.items():
             try:
-                source = 'yahoo' if info['ticker'] else 'boursorama'
+                source = info['source']
                 quote_info = get_current_price_with_currency(
-                    info['ticker'] or info['isin'], source
+                    key, source
                 )
 
                 if quote_info['price'] is None:
@@ -94,7 +117,14 @@ def update_all_quotes(force: bool = False) -> dict:
         # 4. Mettre à jour les cours des positions (Auto réussies)
         for pos in positions:
             if pos.auto_update:
-                key = pos.ticker or pos.code
+                ticker = (pos.ticker or '').strip() or None
+                code = (pos.code or '').strip() or None
+
+                if ticker and not is_isin(ticker):
+                    key = ticker
+                else:
+                    key = code or ticker
+
                 if key in new_quotes:
                     pos.cours_actuel = new_quotes[key]
 
@@ -105,7 +135,14 @@ def update_all_quotes(force: bool = False) -> dict:
         #   défaut, le prix unitaire de la transaction achat OU vente la plus
         #   récente pour ce titre.
         for pos in positions:
-            key = pos.ticker or pos.code
+            ticker = (pos.ticker or '').strip() or None
+            code = (pos.code or '').strip() or None
+
+            if ticker and not is_isin(ticker):
+                key = ticker
+            else:
+                key = code or ticker
+
             is_failed_auto = pos.auto_update and key not in new_quotes
 
             if not pos.auto_update or is_failed_auto:

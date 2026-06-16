@@ -17,7 +17,6 @@ from database.models import Transaction, Position
 from services._yahoo import search_yahoo
 from services._boursorama import search_opcvm
 
-
 # Pattern ISIN : 2 lettres pays + 10 caractères alphanumeriques
 ISIN_PATTERN = re.compile(r'^[A-Z]{2}[A-Z0-9]{9}\d$', re.IGNORECASE)
 
@@ -56,27 +55,36 @@ def search_in_db(query: str, limit: int = 10) -> list[dict]:
         rows = session.execute(stmt).all()
 
         # Filtre Python (case-insensitive sur ticker/code/nom)
-        matched = []
-        seen = set()
+        matched_dict = {}
         for ticker, code, nom, categorie in rows:
             # Skip Cash et Fonds €
             if categorie in ('Cash', 'Fonds €', 'Fonds Euro'):
                 continue
-            # Skip doublons (même nom)
-            key = (ticker or '', code or '', nom or '')
-            if key in seen:
-                continue
+
             # Match si la query apparaît dans ticker, code ou nom
             haystack = f"{ticker or ''} {code or ''} {nom or ''}".lower()
             if q not in haystack:
                 continue
-            seen.add(key)
-            matched.append({
-                'ticker': ticker,
-                'code': code,
-                'nom': nom,
-                'categorie': categorie,
-            })
+
+            nom_key = (nom or '').strip().lower()
+            if not nom_key:
+                continue
+
+            if nom_key not in matched_dict:
+                matched_dict[nom_key] = {
+                    'ticker': ticker,
+                    'code': code,
+                    'nom': nom,
+                    'categorie': categorie,
+                }
+            else:
+                # Merge pour garder le maximum d'infos
+                if not matched_dict[nom_key]['ticker'] and ticker:
+                    matched_dict[nom_key]['ticker'] = ticker
+                if not matched_dict[nom_key]['code'] and code:
+                    matched_dict[nom_key]['code'] = code
+
+        matched = list(matched_dict.values())
 
         if not matched:
             return []

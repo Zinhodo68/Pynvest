@@ -64,6 +64,12 @@ def _render_content(portefeuille_id, c, is_dark, refresh):
                 'montant': t.montant,
                 'libelle': t.libelle,
                 'parent_transaction_id': t.parent_transaction_id,
+                'nom_titre': t.nom_titre,
+                'ticker': t.ticker,
+                'code': t.code,
+                'categorie': t.categorie,
+                'quantite': t.quantite,
+                'prix_unitaire': t.prix_unitaire,
             }
             for t in p.transactions
         ]
@@ -96,6 +102,12 @@ def _render_content(portefeuille_id, c, is_dark, refresh):
                         'montant': t.montant,
                         'libelle': t.libelle,
                         'parent_transaction_id': t.parent_transaction_id,
+                        'nom_titre': t.nom_titre,
+                        'ticker': t.ticker,
+                        'code': t.code,
+                        'categorie': t.categorie,
+                        'quantite': t.quantite,
+                        'prix_unitaire': t.prix_unitaire,
                     }
                     for t in p_chart.transactions
                 ]
