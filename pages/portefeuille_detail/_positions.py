@@ -238,7 +238,9 @@ def _render_position_row(pos, c, portefeuille_id, refresh, refresh_chart=None):
                 )
                 ui.menu_item(
                     '🎁 Dividende',
-                    on_click=lambda p=pos: _open_dividende_dialog(portefeuille_id, p, c, refresh)
+                    on_click=lambda p=pos: _open_dividende_dialog(
+                        portefeuille_id, p, c, refresh, refresh_chart=refresh_chart
+                    )
                 )
 
         # Colonne Titre
@@ -335,14 +337,16 @@ def _open_sell_dialog(portefeuille_id, pos, c, refresh, refresh_chart=None):
     )
 
 
-def _open_dividende_dialog(portefeuille_id, pos, c, refresh):
-    """Ouvre le dialogue de dividende avec l'actif pré-sélectionné."""
-    from pages.portefeuille_detail._dividende_dialog import open_dividende_dialog
-    open_dividende_dialog(
+def _open_dividende_dialog(portefeuille_id, pos, c, refresh, refresh_chart=None):
+    """Ouvre le dialogue unifié de transaction, pré-rempli avec le type
+    "dividende" et la position source — pour rester cohérent avec le bouton
+    "+ Transaction" du panneau Transactions."""
+    from pages.portefeuille_detail._transactions import open_transaction_dialog
+    open_transaction_dialog(
         portefeuille_id, c, refresh,
-        preselect_ticker=pos.get('ticker'),
-        preselect_code=pos.get('code'),
-        preselect_nom=pos.get('nom'),
+        preselect_type_operation='dividende',
+        preselect_position_id=pos.get('id'),
+        refresh_chart=refresh_chart,
     )
 
 

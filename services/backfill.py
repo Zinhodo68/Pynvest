@@ -361,8 +361,20 @@ def backfill_valorisations(portefeuille_id: int) -> int:
 
         def apply_tx(t):
             nonlocal cash
-            key = t.ticker or t.code or t.nom_titre
-            is_asset_specific_tx = bool(key and t.quantite is not None)
+            # 🆕 Crédit sur Fonds € (AV/PER) : on route vers le Fonds €
+            # ciblé par nom_titre, même si ticker/code pointent vers
+            # l'action source (qui a versé le dividende).
+            is_fonds_euro_credit = (
+                t.categorie == 'Fonds Euro'
+                and t.quantite is not None
+                and t.prix_unitaire == 1.0
+            )
+            if is_fonds_euro_credit:
+                key = t.nom_titre
+                is_asset_specific_tx = True
+            else:
+                key = t.ticker or t.code or t.nom_titre
+                is_asset_specific_tx = bool(key and t.quantite is not None)
             is_internal = _is_arbitrage_internal(t, arbitrage_parent_ids)
 
             if t.type_operation == 'versement':
@@ -394,12 +406,18 @@ def backfill_valorisations(portefeuille_id: int) -> int:
                 if is_asset_specific_tx:
                     if key in positions_held:
                         old = positions_held[key]
-                        new_qte = old['quantite'] + t.quantite
-                        old['pru'] = (
-                            ((old['quantite'] * old['pru']) + (t.quantite * (t.prix_unitaire or 0))) / new_qte
-                            if new_qte > 0 else (t.prix_unitaire or 0)
-                        )
-                        old['quantite'] = new_qte
+                        if is_fonds_euro_credit:
+                            # Crédit Fonds € : on ne touche pas au PRU
+                            # (toujours 1.0 pour un Fonds €)
+                            old['quantite'] += t.quantite
+                        else:
+                            # Réinvestissement : moyenne pondérée du PRU
+                            new_qte = old['quantite'] + t.quantite
+                            old['pru'] = (
+                                ((old['quantite'] * old['pru']) + (t.quantite * (t.prix_unitaire or 0))) / new_qte
+                                if new_qte > 0 else (t.prix_unitaire or 0)
+                            )
+                            old['quantite'] = new_qte
                     else:
                         _ensure_pos(key, t, t.prix_unitaire)
                 else:

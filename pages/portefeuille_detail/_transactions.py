@@ -689,17 +689,32 @@ def render_transactions_card(transactions, c, is_dark, refresh, portefeuille_id,
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = None,
-                            refresh_chart=None):
-    """Création ou édition d'une transaction."""
+                            refresh_chart=None,
+                            preselect_type_operation: str = None,
+                            preselect_position_id=None):
+    """Création ou édition d'une transaction.
+
+    En mode création, on peut pré-remplir le type d'opération et la position
+    source (utile quand on arrive depuis le clic droit "Dividende" sur une
+    position). Ces pré-sélections sont ignorées en mode édition (transaction_id).
+    """
     client = ui.context.client
     is_edit = transaction_id is not None
 
     data = {
         'date_operation': date.today().isoformat(),
-        'type_operation': 'versement',
+        'type_operation': (
+            preselect_type_operation
+            if (preselect_type_operation and not is_edit)
+            else 'versement'
+        ),
         'montant': 0.0,
         'libelle': '',
-        'source_position_id': None,
+        'source_position_id': (
+            preselect_position_id
+            if (preselect_position_id is not None and not is_edit)
+            else None
+        ),
         'initial_fee_type': 'cash',
         'initial_fee_parts_quantity': 0.0,
     }
@@ -907,7 +922,7 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                 dividend_options,
                 label='Actif source du dividende *',
                 value=data['source_position_id']
-                if is_edit and data.get('source_position_id')
+                if data.get('source_position_id')
                 and data['type_operation'] == 'dividende' else None
             ).classes('w-full')
 
@@ -916,9 +931,8 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                     fees_options,
                     label='Actif à débiter (parts) *',
                     value=data['source_position_id']
-                    if is_edit and data.get('source_position_id')
-                    and data['type_operation'] == 'frais'
-                    else None
+                    if data.get('source_position_id')
+                    and data['type_operation'] == 'frais' else None
                 ).classes('w-full')
         else:
             no_chargeable_assets_label = ui.label(
@@ -936,7 +950,7 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
         ).classes('w-full').props('toggle-color="primary" spread')
 
         with ui.input('Date', value=date_initiale_fr).classes('w-full') \
-                .props('mask="##/##/####" placeholder="JJ/MM/AAAA"') as date_input_ui_element:
+                .props('mask="##/##/####" placeholder="JJ/MM/AAAA" onfocus="this.select()"') as date_input_ui_element:
             with ui.menu().props('no-parent-event') as menu:
                 date_picker = ui.date().bind_value(date_input_ui_element).props(
                     'mask="DD/MM/YYYY"'
@@ -1501,18 +1515,40 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                         if _is_historical_id(selected_div_id):
                             # Titre vendu : on récupère les infos depuis l'option
                             hist_info = chargeable_positions_options[selected_div_id]
-                            t_final = Transaction(
-                                portefeuille_id=portefeuille_id,
-                                date_operation=date_val,
-                                type_operation='dividende',
-                                montant=montant_val_for_tx,
-                                libelle=libelle,
-                                nom_titre=hist_info['nom'],
-                                ticker=hist_info['ticker'],
-                                code=hist_info['code'],
-                                categorie=hist_info['categorie'],
-                                quantite=None, prix_unitaire=None,
-                            )
+                            if is_av_per:
+                                # Crédit sur Fonds € : on stocke les champs
+                                # quantite/prix_unitaire/nom_titre/categorie
+                                # pour que le backfill puisse rejouer correctement
+                                # (sinon la valo portefeuille devient incohérente
+                                # après backfill). On garde ticker/code source
+                                # pour le reporting.
+                                fe_name = fonds_euros_dict.get(fonds_euro_select.value)
+                                t_final = Transaction(
+                                    portefeuille_id=portefeuille_id,
+                                    date_operation=date_val,
+                                    type_operation='dividende',
+                                    montant=montant_val_for_tx,
+                                    libelle=libelle,
+                                    nom_titre=fe_name,
+                                    ticker=hist_info['ticker'],
+                                    code=hist_info['code'],
+                                    categorie='Fonds Euro',
+                                    quantite=montant_val_for_tx,
+                                    prix_unitaire=1.0,
+                                )
+                            else:
+                                t_final = Transaction(
+                                    portefeuille_id=portefeuille_id,
+                                    date_operation=date_val,
+                                    type_operation='dividende',
+                                    montant=montant_val_for_tx,
+                                    libelle=libelle,
+                                    nom_titre=hist_info['nom'],
+                                    ticker=hist_info['ticker'],
+                                    code=hist_info['code'],
+                                    categorie=hist_info['categorie'],
+                                    quantite=None, prix_unitaire=None,
+                                )
                             session.add(t_final)
                             session.flush()
                             if is_av_per:
@@ -1561,18 +1597,39 @@ def open_transaction_dialog(portefeuille_id, c, refresh, transaction_id: int = N
                                 )
                                 session.add(t_final)
                             else:
-                                t_final = Transaction(
-                                    portefeuille_id=portefeuille_id,
-                                    date_operation=date_val,
-                                    type_operation='dividende',
-                                    montant=montant_val_for_tx,
-                                    libelle=libelle,
-                                    nom_titre=source_pos_for_tx.nom,
-                                    ticker=source_pos_for_tx.ticker,
-                                    code=source_pos_for_tx.code,
-                                    categorie=source_pos_for_tx.categorie,
-                                    quantite=None, prix_unitaire=None,
-                                )
+                                if is_av_per:
+                                    # Crédit sur Fonds € (AV/PER) : on remplit
+                                    # quantite/prix_unitaire/nom_titre/categorie
+                                    # pour que le backfill puisse rejouer
+                                    # correctement. ticker/code source restent
+                                    # pour le reporting.
+                                    fe_name = fonds_euros_dict.get(fonds_euro_select.value)
+                                    t_final = Transaction(
+                                        portefeuille_id=portefeuille_id,
+                                        date_operation=date_val,
+                                        type_operation='dividende',
+                                        montant=montant_val_for_tx,
+                                        libelle=libelle,
+                                        nom_titre=fe_name,
+                                        ticker=source_pos_for_tx.ticker,
+                                        code=source_pos_for_tx.code,
+                                        categorie='Fonds Euro',
+                                        quantite=montant_val_for_tx,
+                                        prix_unitaire=1.0,
+                                    )
+                                else:
+                                    t_final = Transaction(
+                                        portefeuille_id=portefeuille_id,
+                                        date_operation=date_val,
+                                        type_operation='dividende',
+                                        montant=montant_val_for_tx,
+                                        libelle=libelle,
+                                        nom_titre=source_pos_for_tx.nom,
+                                        ticker=source_pos_for_tx.ticker,
+                                        code=source_pos_for_tx.code,
+                                        categorie=source_pos_for_tx.categorie,
+                                        quantite=None, prix_unitaire=None,
+                                    )
                                 session.add(t_final)
                                 session.flush()
                                 if is_av_per:
